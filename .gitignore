@@ -1,0 +1,50 @@
+# --- machine-local config (repo root: config/) ---
+config/export_urls.env
+config/chrome-user-data/
+
+# legacy chrome profile path (migrated to config/chrome-user-data/)
+src/config/
+
+# --- run outputs (artifacts/<report_id>/, artifacts/_ops/, artifacts/latest/) ---
+artifacts/*
+!artifacts/.gitkeep
+
+# --- secrets ---
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+
+# --- exported / captured data ---
+**/*.xlsx
+**/*.xlsm
+**/*.csv
+**/*.har
+reportviewer*.html
+
+# --- python / packaging ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# --- legacy layouts (pre-src reorg) ---
+local/
+session/
+chrome-user-data/
+workspace-local/
+latest_result.json
+
+# --- os / editor ---
+.DS_Store
+.omc/
+.vscode/settings.json
+config/reports.yaml

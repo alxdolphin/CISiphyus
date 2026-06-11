@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cisiphyus"
+version = "0.2.0"
+description = "CISDM report export automation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.49.0",
+    "PyYAML>=6.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+cisiphyus = "cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "artifacts",
+    "bootstrap",
+    "browser",
+    "cli",
+    "config",
+    "fetch",
+    "report",
+    "session",
+    "url_refresh",
+    "validate",
+]
