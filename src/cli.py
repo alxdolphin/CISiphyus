@@ -16,7 +16,6 @@ from playwright.sync_api import sync_playwright
 import bootstrap
 import config
 import report
-import session
 from artifacts import RunResult
 
 # re-exports for tests and downstream introspection
@@ -59,16 +58,24 @@ def main() -> None:
         action="store_true",
         help="Replace an existing bootstrap profile under config/chrome-user-data/.",
     )
+    parser.add_argument(
+        "--verify-report",
+        default=None,
+        metavar="REPORT_ID",
+        help="Optional: probe a report URL during bootstrap (e.g. accreditation).",
+    )
 
     args = parser.parse_args()
     chrome_user_data_dir = config.default_chrome_user_data_dir()
     chrome_profile_directory = config.DEFAULT_CHROME_PROFILE_DIRECTORY
+    verify_report = (args.verify_report or "").strip() or None
 
     if args.bootstrap:
         result = bootstrap.bootstrap_profile(
             chrome_user_data_dir,
             chrome_profile_directory,
             force=args.force,
+            verify_report=verify_report,
             playwright_factory=sync_playwright,
         )
     else:
@@ -77,7 +84,6 @@ def main() -> None:
             headed=args.headed,
             chrome_user_data_dir=chrome_user_data_dir,
             chrome_profile_directory=chrome_profile_directory,
-            cookies_file=session.default_cookies_file(),
         )
 
     print_summary(result)
