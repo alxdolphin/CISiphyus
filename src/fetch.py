@@ -234,7 +234,7 @@ def _establish_app_context(page: Any, context: Any, context_url: str) -> bool:
         context,
         "Context_CaseWorthy",
         timeout_seconds=CONTEXT_COOKIE_WAIT_SECONDS,
-        cookie_urls=[config.BASE_URL],
+        cookie_urls=[config.BASE_URL, page.url],
     )
 
 
