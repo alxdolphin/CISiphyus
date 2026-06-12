@@ -153,7 +153,9 @@ def verify_cisdm_auth(
 
 
 def flush_auth_state(page: Any, *, base_url: str) -> None:
-    page.goto(base_url, wait_until="networkidle", timeout=config.NAVIGATION_TIMEOUT_MS)
+    # networkidle never fires on CISDM's long-polling SPA; domcontentloaded
+    # plus the settle sleep is enough since this only flushes auth state.
+    page.goto(base_url, wait_until="domcontentloaded", timeout=config.NAVIGATION_TIMEOUT_MS)
     time.sleep(BOOTSTRAP_SETTLE_SECONDS)
     dismiss_blocking_dialogs(page)
 
