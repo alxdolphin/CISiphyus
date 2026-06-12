@@ -232,12 +232,10 @@ def assert_required_cookies_on_disk(profile_dir: Path) -> dict[str, Any]:
         }
         if db_error:
             diagnostics["cookies_db_error"] = db_error
-        message = (
-            f"Chrome cookie database unreadable ({db_error}): {cookies_db}"
-            if db_error
-            else "Required CISDM cookies missing from profile Cookies database: "
-            + ", ".join(missing)
-        )
+        if db_error:
+            message = f"Chrome cookie database unreadable ({db_error}): {cookies_db}"
+        else:
+            message = f"Required CISDM cookies missing from profile Cookies database: {', '.join(missing)}"
         raise RequiredCookiesError(message, missing=missing, diagnostics=diagnostics)
 
     return {

@@ -89,7 +89,7 @@ def _inject_exported_cookies(context: Any, diag: dict[str, Any]) -> None:
         raise FetchFailedError(
             f"cookie_injection_failed: exported cookies file is unreadable or "
             f"malformed ({type(exc).__name__}). Re-run bootstrap to regenerate "
-            f"{cookies_path}: {config.BOOTSTRAP_COMMAND}",
+            f"{cookies_path}. Command: {config.BOOTSTRAP_COMMAND}",
             diag,
         ) from exc
     diag["cookies_injected_count"] = len(valid)
