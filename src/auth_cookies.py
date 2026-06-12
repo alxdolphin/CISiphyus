@@ -185,17 +185,29 @@ def assert_required_cookies_in_context(
     return metadata
 
 
-def read_cookie_entries_from_sqlite(cookies_db: Path) -> list[dict[str, str]]:
+def _read_cookie_entries_safe(
+    cookies_db: Path,
+) -> tuple[list[dict[str, str]], str | None]:
+    """Read cookie name/domain rows, treating any sqlite failure (locked,
+    corrupt, unsupported schema) as an unusable-but-diagnosable profile."""
     if not cookies_db.is_file():
-        return []
+        return [], None
 
-    connection = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
     try:
-        rows = connection.execute("SELECT name, host_key FROM cookies").fetchall()
-    finally:
-        connection.close()
+        connection = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
+        try:
+            rows = connection.execute("SELECT name, host_key FROM cookies").fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return [], f"{type(exc).__name__}: {exc}"
 
-    return [{"name": str(row[0]), "domain": str(row[1])} for row in rows]
+    return [{"name": str(row[0]), "domain": str(row[1])} for row in rows], None
+
+
+def read_cookie_entries_from_sqlite(cookies_db: Path) -> list[dict[str, str]]:
+    entries, _error = _read_cookie_entries_safe(cookies_db)
+    return entries
 
 
 def read_cookie_names_from_sqlite(cookies_db: Path) -> set[str]:
@@ -210,19 +222,23 @@ def assert_required_cookies_on_disk(profile_dir: Path) -> dict[str, Any]:
             missing=REQUIRED_COOKIE_NAMES,
         )
 
-    entries_on_disk = read_cookie_entries_from_sqlite(cookies_db)
+    entries_on_disk, db_error = _read_cookie_entries_safe(cookies_db)
     names_on_disk = {entry["name"] for entry in entries_on_disk}
     missing = tuple(name for name in REQUIRED_COOKIE_NAMES if name not in names_on_disk)
     if missing:
-        raise RequiredCookiesError(
-            "Required CISDM cookies missing from profile Cookies database: "
-            + ", ".join(missing),
-            missing=missing,
-            diagnostics={
-                "cookies_db_path": str(cookies_db),
-                "all_disk_cookies": entries_on_disk,
-            },
+        diagnostics: dict[str, Any] = {
+            "cookies_db_path": str(cookies_db),
+            "all_disk_cookies": entries_on_disk,
+        }
+        if db_error:
+            diagnostics["cookies_db_error"] = db_error
+        message = (
+            f"Chrome cookie database unreadable ({db_error}): {cookies_db}"
+            if db_error
+            else "Required CISDM cookies missing from profile Cookies database: "
+            + ", ".join(missing)
         )
+        raise RequiredCookiesError(message, missing=missing, diagnostics=diagnostics)
 
     return {
         "cookies_db_path": str(cookies_db),
