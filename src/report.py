@@ -43,17 +43,29 @@ def _resolve_report_urls(
     return retrieval_strategy, export_url, url_env
 
 
+def _resolve_context_url(report_id: str, profile: dict) -> str | None:
+    """Optional module/form page visited before export to establish the CISDM
+    app context (issues the Context_CaseWorthy session cookie)."""
+    context_url_env = profile.get("context_url_env")
+    if context_url_env is None:
+        return None
+    if not isinstance(context_url_env, str) or not context_url_env.strip():
+        raise RuntimeError(f"Report {report_id} context_url_env must be a non-empty string")
+    entry_key = context_url_env.strip()
+    context_url = os.environ.get(entry_key, "")
+    if not context_url:
+        raise RuntimeError(f"Missing context URL env var: {entry_key}")
+    return context_url
+
+
 def _failure_diag(
     *,
     error: str,
-    cookies_file: Path | None,
-    storage_state_file: Path | None,
     fetch_diag: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "error": error,
-        "cookies_file": str(cookies_file) if cookies_file else None,
-        "storage_state_file": str(storage_state_file) if storage_state_file else None,
+        "auth_source": "chrome_user_data_profile",
     }
     if fetch_diag:
         payload.update(fetch_diag)
@@ -65,8 +77,6 @@ def run_report(
     headed: bool,
     chrome_user_data_dir: Path,
     chrome_profile_directory: str,
-    cookies_file: Path | None,
-    storage_state_file: Path | None = None,
 ) -> artifacts.RunResult:
     started_at = artifacts.utc_now_iso()
     latest_dir = config.latest_report_dir(report_id)
@@ -82,6 +92,7 @@ def run_report(
 
         profile = reports[report_id]
         retrieval_strategy, target_url, _env_key = _resolve_report_urls(report_id, profile)
+        context_url = _resolve_context_url(report_id, profile)
         min_size_bytes = int(profile.get("min_size_bytes", 1))
         required_columns = profile.get("required_columns", [])
 
@@ -91,11 +102,10 @@ def run_report(
         fetch.fetch_excel_download(
             strategy=retrieval_strategy,
             target_url=target_url,
+            context_url=context_url,
             output_path=raw_path,
             chrome_user_data_dir=chrome_user_data_dir,
             chrome_profile_directory=chrome_profile_directory,
-            cookies_file=cookies_file,
-            storage_state_file=storage_state_file,
             headed=headed,
         )
 
@@ -125,8 +135,6 @@ def run_report(
             latest_dir,
             _failure_diag(
                 error=error,
-                cookies_file=cookies_file,
-                storage_state_file=storage_state_file,
                 fetch_diag=exc.diag,
             ),
         )
@@ -143,11 +151,7 @@ def run_report(
         error = f"{type(exc).__name__}: {exc}"
         artifacts.write_failure_diag(
             latest_dir,
-            _failure_diag(
-                error=error,
-                cookies_file=cookies_file,
-                storage_state_file=storage_state_file,
-            ),
+            _failure_diag(error=error),
         )
         return artifacts.write_latest_result(
             report_id=report_id,
