@@ -12,11 +12,13 @@ artifacts/*
 # --- secrets ---
 .env
 .env.*
+CISDM_cookies.json
 *.pem
 *.key
 *.pfx
 
 # --- exported / captured data ---
+*.7z
 **/*.xlsx
 **/*.xlsm
 **/*.csv
@@ -48,3 +50,7 @@ latest_result.json
 .omc/
 .vscode/settings.json
 config/reports.yaml
+
+# --- local-only test suite ---
+tests/
+docs/
