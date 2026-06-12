@@ -25,7 +25,6 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && playwright install chromium
 ```
 
-
 **CISDM Export / Report URLs**
 
 ```bash
@@ -45,7 +44,7 @@ For each export / report you want to retrieve, you need to get the URL from CISD
 python run.py --bootstrap
 ```
 
-The CISDM session is persisted in `config/chrome-user-data/` and reused on every later run. Log in via the browser, then press Enter in the terminal.
+The CISDM session is persisted in `config/chrome-user-data/` (Playwright profile `Profile 1`) and reused on every later run. Log in via the browser, then press Enter in the terminal.
 
 ## USAGE
 
@@ -56,6 +55,11 @@ cisiphyus student_metrics_summary
 ```
 
 ## CHANGELOG
+
+* 0.2.0
+    * Verify `Auth_CaseWorthy` / `Context_CaseWorthy` and export them to `config/CISDM_cookies.json` during bootstrap
+    * Failures now write `result.json` / `diag.json` with redacted cookie inventories for diagnosis
+    * Removed legacy `session.py` cookie-overlay module (superseded by bootstrap-generated export)
 
 * 0.1.0
     * Initial Release
