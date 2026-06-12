@@ -14,7 +14,21 @@ import auth_cookies
 import browser
 import config
 
-BOOTSTRAP_SETTLE_SECONDS = int(os.environ.get("CISIPHYUS_BOOTSTRAP_SETTLE_SECONDS", "2"))
+def _parse_settle_seconds(raw: str | None, default: int = 2) -> int:
+    """Parse the settle-seconds override defensively: a malformed env var must
+    never prevent the CLI from importing this module."""
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+BOOTSTRAP_SETTLE_SECONDS = _parse_settle_seconds(
+    os.environ.get("CISIPHYUS_BOOTSTRAP_SETTLE_SECONDS")
+)
 
 
 def classify_auth_probe(url: str, body_preview: str, *, title: str = "") -> tuple[bool, str]:
