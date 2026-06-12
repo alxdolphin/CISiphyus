@@ -2,6 +2,8 @@ reports:
   student_metrics_summary:
     display_name: "Student Metrics Summary"
     url_env: "CISDM_STUDENT_METRICS_EXPORT_URL"
+    # optional: Form.aspx module page visited before export to establish app context
+    context_url_env: "CISDM_STUDENT_METRICS_CONTEXT_URL"
     expected_extension: ".xlsx"
     min_size_bytes: 10000
     required_columns:

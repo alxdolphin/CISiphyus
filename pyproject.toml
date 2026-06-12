@@ -24,13 +24,13 @@ cisiphyus = "cli:main"
 package-dir = {"" = "src"}
 py-modules = [
     "artifacts",
+    "auth_cookies",
     "bootstrap",
     "browser",
     "cli",
     "config",
     "fetch",
     "report",
-    "session",
     "url_refresh",
     "validate",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -8,6 +9,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yaml
+
+import auth_cookies
 
 
 def find_project_root() -> Path:
@@ -25,6 +28,7 @@ ENV_PATH = CONFIG_DIR / "export_urls.env"
 ARTIFACTS = ROOT / "artifacts"
 LATEST_DIR = ARTIFACTS / "latest"
 AUTH_BOOTSTRAP_MARKER_NAME = ".cisiphyus_auth_bootstrap.json"
+COOKIES_EXPORT_PATH = CONFIG_DIR / "CISDM_cookies.json"
 DEFAULT_CHROME_PROFILE_DIRECTORY = "Profile 1"
 BOOTSTRAP_COMMAND = "python run.py --bootstrap"
 
@@ -132,14 +136,20 @@ def auth_bootstrap_marker_path(chrome_user_data_dir: Path) -> Path:
 
 
 def bootstrap_profile_exists(chrome_user_data_dir: Path) -> bool:
-    if auth_bootstrap_marker_path(chrome_user_data_dir).exists():
-        return True
-    if not chrome_user_data_dir.is_dir():
+    marker_path = auth_bootstrap_marker_path(chrome_user_data_dir)
+    if not marker_path.is_file():
         return False
+
     try:
-        return any(chrome_user_data_dir.iterdir())
-    except OSError:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return False
+
+    if not isinstance(marker, dict) or not marker.get("disk_verified_at"):
+        return False
+
+    profile_dir = chrome_user_data_dir / DEFAULT_CHROME_PROFILE_DIRECTORY
+    return auth_cookies.disk_has_required_cookies(profile_dir)
 
 
 def latest_report_dir(report_id: str) -> Path:
