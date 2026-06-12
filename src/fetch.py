@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -9,13 +10,17 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+import auth_cookies
 import browser
 import config
-import session
 import url_refresh
 from bootstrap import capture_page_body_preview, classify_auth_probe
 
 RetrievalStrategy = Literal["direct_url", "ui_export"]
+
+# Silent SSO re-auth happens asynchronously a few seconds after page load.
+AUTH_COOKIE_WAIT_SECONDS = 45
+CONTEXT_COOKIE_WAIT_SECONDS = 30
 
 
 class FetchFailedError(RuntimeError):
@@ -45,14 +50,33 @@ def classify_no_download_reason(body_preview: str) -> tuple[str, str | None]:
     return "no_download_after_export_navigation", None
 
 
-def _session_diag(
-    cookies_file: Path | None,
-    storage_state_file: Path | None,
-) -> dict[str, Any]:
+def _session_diag() -> dict[str, Any]:
     return {
-        "cookies_file": str(cookies_file) if cookies_file else None,
-        "storage_state_file": str(storage_state_file) if storage_state_file else None,
+        "auth_source": "chrome_user_data_profile",
     }
+
+
+def _inject_exported_cookies(context: Any, diag: dict[str, Any]) -> None:
+    """Seed the session with cookies captured during bootstrap so the export
+    starts fully authenticated, matching the proven cookie-overlay flow."""
+    cookies_path = config.COOKIES_EXPORT_PATH
+    if not cookies_path.is_file():
+        return
+
+    raw = json.loads(cookies_path.read_text(encoding="utf-8"))
+    cookies = raw.get("cookies", []) if isinstance(raw, dict) else raw
+    valid = [
+        cookie
+        for cookie in cookies
+        if isinstance(cookie, dict)
+        and cookie.get("name")
+        and cookie.get("value") is not None
+        and cookie.get("domain")
+    ]
+    if valid:
+        context.add_cookies(valid)
+    diag["cookies_file"] = str(cookies_path)
+    diag["cookies_injected_count"] = len(valid)
 
 
 def _warmup_page(page: Any) -> None:
@@ -143,10 +167,13 @@ def _ui_export_download(page: Any, output_path: Path) -> None:
 
 def _direct_url_download(page: Any, export_url: str) -> None:
     try:
+        # Send the current page (module/warmup) as referer: a bare navigation
+        # has none, and CISDM may reject exports without an in-app origin.
         page.goto(
             export_url,
             wait_until="domcontentloaded",
             timeout=max(config.NAVIGATION_TIMEOUT_MS, config.DOWNLOAD_TIMEOUT_MS),
+            referer=page.url,
         )
     except PlaywrightError as exc:
         message = str(exc)
@@ -165,22 +192,51 @@ def _resolve_direct_export_url(page: Any, target_url: str) -> tuple[str, dict[st
         }
 
 
+def _record_context_cookies(diag: dict[str, Any], context: Any) -> None:
+    # Browser may already be unusable when a fetch fails; never let the
+    # cookie snapshot mask the original error.
+    try:
+        diag["fetch_context_cookies"] = auth_cookies.context_cookie_inventory(
+            context,
+            cookie_urls=[config.BASE_URL],
+        )
+    except Exception as exc:
+        diag["fetch_context_cookies_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _establish_app_context(page: Any, context: Any, context_url: str) -> bool:
+    """Visit the module/form page so CISDM issues Context_CaseWorthy.
+
+    The export endpoints return 403 in a fresh session because the context
+    session cookie only exists after entering an app module."""
+    page.goto(
+        context_url,
+        wait_until="domcontentloaded",
+        timeout=config.NAVIGATION_TIMEOUT_MS,
+    )
+    return auth_cookies.wait_for_cookie_in_context(
+        context,
+        "Context_CaseWorthy",
+        timeout_seconds=CONTEXT_COOKIE_WAIT_SECONDS,
+        cookie_urls=[config.BASE_URL],
+    )
+
+
 def fetch_excel_download(
     *,
     strategy: RetrievalStrategy,
     target_url: str,
     output_path: Path,
+    context_url: str | None = None,
     chrome_user_data_dir: Path,
     chrome_profile_directory: str,
-    cookies_file: Path | None,
-    storage_state_file: Path | None,
     headed: bool,
     playwright_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     browser.reject_system_chrome_dir(chrome_user_data_dir)
     chrome_user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    diag = _session_diag(cookies_file, storage_state_file)
+    diag = _session_diag()
     pw_factory = playwright_factory or sync_playwright
     download_timeout = (
         config.REPORT_VIEWER_DOWNLOAD_TIMEOUT_MS
@@ -198,11 +254,30 @@ def fetch_excel_download(
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            session.apply_session_to_context(
-                context, page, storage_state_file, cookies_file
-            )
+            _inject_exported_cookies(context, diag)
             _warmup_page(page)
             diag["warmup_url"] = page.url
+
+            auth_ready = auth_cookies.wait_for_cookie_in_context(
+                context,
+                "Auth_CaseWorthy",
+                timeout_seconds=AUTH_COOKIE_WAIT_SECONDS,
+                cookie_urls=[config.BASE_URL],
+            )
+            diag["warmup_auth_cookie_present"] = auth_ready
+            if not auth_ready:
+                _record_context_cookies(diag, context)
+                raise FetchFailedError(
+                    "warmup_unauthenticated: Auth_CaseWorthy never appeared within "
+                    f"{AUTH_COOKIE_WAIT_SECONDS}s of warmup. Run bootstrap first: "
+                    f"{config.BOOTSTRAP_COMMAND}",
+                    diag,
+                )
+
+            if context_url:
+                context_ready = _establish_app_context(page, context, context_url)
+                diag["context_url_visited"] = config.redact_url(context_url)
+                diag["context_cookie_present"] = context_ready
 
             export_url_to_use = target_url
             if strategy == "direct_url":
@@ -229,6 +304,7 @@ def fetch_excel_download(
                 return diag
             except PlaywrightTimeoutError:
                 diag["post_navigation_url"] = page.url
+                _record_context_cookies(diag, context)
                 reason, hint = _handle_no_download_timeout(
                     page, strategy=strategy, warmup_url=diag["warmup_url"]
                 )
@@ -238,6 +314,7 @@ def fetch_excel_download(
                 raise FetchFailedError(message, diag) from None
             except PlaywrightError as exc:
                 diag["post_navigation_url"] = page.url
+                _record_context_cookies(diag, context)
                 if strategy == "ui_export":
                     raise FetchFailedError(f"report_viewer_excel_export_failed: {exc}", diag) from exc
                 raise FetchFailedError(str(exc), diag) from exc
