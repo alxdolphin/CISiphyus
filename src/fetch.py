@@ -63,19 +63,35 @@ def _inject_exported_cookies(context: Any, diag: dict[str, Any]) -> None:
     if not cookies_path.is_file():
         return
 
-    raw = json.loads(cookies_path.read_text(encoding="utf-8"))
-    cookies = raw.get("cookies", []) if isinstance(raw, dict) else raw
-    valid = [
-        cookie
-        for cookie in cookies
-        if isinstance(cookie, dict)
-        and cookie.get("name")
-        and cookie.get("value") is not None
-        and cookie.get("domain")
-    ]
-    if valid:
-        context.add_cookies(valid)
     diag["cookies_file"] = str(cookies_path)
+    try:
+        raw = json.loads(cookies_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            cookies = raw.get("cookies", [])
+        else:
+            cookies = raw
+        if not isinstance(cookies, list):
+            raise ValueError(
+                f"expected a list of cookies, got {type(cookies).__name__}"
+            )
+        valid = [
+            cookie
+            for cookie in cookies
+            if isinstance(cookie, dict)
+            and cookie.get("name")
+            and cookie.get("value") is not None
+            and cookie.get("domain")
+        ]
+        if valid:
+            context.add_cookies(valid)
+    except (OSError, json.JSONDecodeError, PlaywrightError, TypeError, ValueError) as exc:
+        diag["cookies_inject_error"] = f"{type(exc).__name__}: {exc}"
+        raise FetchFailedError(
+            f"cookie_injection_failed: exported cookies file is unreadable or "
+            f"malformed ({type(exc).__name__}). Re-run bootstrap to regenerate "
+            f"{cookies_path}: {config.BOOTSTRAP_COMMAND}",
+            diag,
+        ) from exc
     diag["cookies_injected_count"] = len(valid)
 
 
