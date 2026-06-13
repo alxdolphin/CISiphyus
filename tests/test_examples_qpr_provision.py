@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_DIR = REPO_ROOT / "examples" / "qpr"
@@ -18,7 +19,12 @@ from qpr_cisiphyus_prefetch import (  # noqa: E402
     _cisiphyus_cmd,
     _default_cisiphyus_root,
 )
-from qpr_tools_loader import default_cis_monorepo_root, load_qpr_tools, qpr_tools_path  # noqa: E402
+from qpr_tools_loader import (  # noqa: E402
+    default_site_staff_list_path,
+    default_template_path,
+    load_qpr_tools,
+    qpr_tools_path,
+)
 
 FIXTURE_METRICS = EXAMPLE_DIR / "fixtures" / "student_metrics_summary_minimal.xlsx"
 FIXTURE_TEMPLATE = EXAMPLE_DIR / "fixtures" / "qpr_import_template.xlsx"
@@ -95,11 +101,17 @@ def test_prefetch_refreshes_stale_workbook(monkeypatch, tmp_path: Path) -> None:
     assert dest.read_bytes() == b"new"
 
 
-def test_qpr_tools_loader_finds_production_module() -> None:
-    path = qpr_tools_path(default_cis_monorepo_root())
+def test_qpr_tools_loader_finds_bundled_module() -> None:
+    path = qpr_tools_path()
     assert path.is_file()
+    assert path == EXAMPLE_DIR / "qpr_tools.py"
     module = load_qpr_tools()
     assert hasattr(module, "provision_all_site_templates")
+
+
+def test_default_fixture_paths_exist() -> None:
+    assert default_template_path().is_file()
+    assert default_site_staff_list_path().is_file()
 
 
 def test_resolve_paths_use_bundled_fixtures() -> None:
@@ -108,8 +120,6 @@ def test_resolve_paths_use_bundled_fixtures() -> None:
 
 
 def test_provision_generates_site_workbooks(tmp_path: Path) -> None:
-    if not qpr_tools_path(default_cis_monorepo_root()).is_file():
-        return
     code = provision.main(
         [
             str(tmp_path),
@@ -134,8 +144,6 @@ def test_provision_generates_site_workbooks(tmp_path: Path) -> None:
 
 
 def test_provision_single_school(tmp_path: Path) -> None:
-    if not qpr_tools_path(default_cis_monorepo_root()).is_file():
-        return
     code = provision.main(
         [
             str(tmp_path),
@@ -156,6 +164,8 @@ def test_provision_single_school(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.xlsx")), "expected a provisioned workbook"
 
 
-def test_provision_requires_qpr_tools_when_missing(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("CIS_MONOREPO_ROOT", str(tmp_path / "missing"))
-    assert provision.main(["/tmp/out", "--grading-period", "2.0", "--no-site-staff-filter"]) == 1
+def test_provision_requires_bundled_qpr_tools(monkeypatch, tmp_path: Path) -> None:
+    missing = tmp_path / "qpr_tools.py"
+    with patch.object(provision, "load_qpr_tools", side_effect=FileNotFoundError("missing bundled qpr_tools")):
+        code = provision.main(["/tmp/out", "--grading-period", "2.0", "--no-site-staff-filter"])
+    assert code == 1
