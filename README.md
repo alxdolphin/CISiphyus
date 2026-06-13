@@ -8,7 +8,7 @@ CISiphyus automates the retrieval of CISDM reports, enabling scripted, repeatabl
 
 ### Dependencies
 
-* Python 3.8+
+* Python 3.10+
 
   * [playwright](https://github.com/microsoft/playwright)
       `chromium`
