@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision QPR import workbooks using production qpr_tools provision-batch logic."""
+"""Provision QPR import workbooks using bundled qpr_tools provision logic."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ if str(SCRIPT_DIR) not in sys.path:
 from qpr_cisiphyus_prefetch import maybe_prefetch_student_metrics, preferred_student_metrics_destination
 from qpr_tools_loader import (
     REPO_ROOT,
-    default_cis_monorepo_root,
     default_deadlines_path,
+    default_site_staff_list_path,
     default_template_path,
     load_qpr_tools,
 )
+
 
 def resolve_metric_workbook(explicit: Path | None) -> Path:
     if explicit is not None:
@@ -41,9 +42,23 @@ def resolve_template_path(explicit: Path | None) -> Path:
     if path.is_file():
         return path
     raise FileNotFoundError(
-        "No QPR template found. Provide --template or set CIS_MONOREPO_ROOT to a CIS checkout "
-        "containing evaluation/reports/QPR/[TEMPLATE] QPR Import.xlsx."
+        f"No QPR template found at {path}. Provide --template with a local import workbook."
     )
+
+
+def resolve_site_staff_filter(
+    *,
+    explicit: Path | None,
+    no_site_staff_filter: bool,
+) -> tuple[Path | None, bool]:
+    if no_site_staff_filter:
+        return None, False
+    if explicit is not None:
+        return explicit.expanduser().resolve(), True
+    bundled = default_site_staff_list_path()
+    if bundled.is_file():
+        return bundled, True
+    return None, False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,12 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--template",
         type=Path,
-        help="QPR import template workbook (default: CIS monorepo template).",
+        help="QPR import template workbook (default: examples/qpr/fixtures/qpr_import_template.xlsx).",
     )
     parser.add_argument(
         "--deadlines",
         type=Path,
-        help="Reporting deadlines workbook (default: CIS monorepo local_inputs or evaluation/reports).",
+        help="Reporting deadlines workbook (default: examples/qpr/fixtures/reporting_deadlines_minimal.xlsx).",
     )
     parser.add_argument(
         "--metric-workbook",
@@ -95,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--site-staff-list",
         type=Path,
-        help="Site/staff workbook for active-site filtering (CIS monorepo default when omitted).",
+        help="Site/staff workbook for active-site filtering (default: bundled fixture when present).",
     )
     parser.add_argument(
         "--uat",
@@ -119,12 +134,10 @@ def main(argv: list[str] | None = None) -> int:
         deadlines_path = (args.deadlines or default_deadlines_path()).expanduser().resolve()
         output_directory = (args.output_directory or (REPO_ROOT / "examples" / "qpr" / "output")).resolve()
         metric_prefill = None if args.no_metric_workbook else metric_workbook
-
-        site_staff_list = args.site_staff_list
-        if site_staff_list is None and not args.no_site_staff_filter:
-            candidate = default_cis_monorepo_root() / "tools" / "qpr" / "local_inputs" / "SY25-26 Site_Staff List.xlsx"
-            if candidate.is_file():
-                site_staff_list = candidate
+        site_staff_list, use_site_staff_filter = resolve_site_staff_filter(
+            explicit=args.site_staff_list,
+            no_site_staff_filter=args.no_site_staff_filter,
+        )
 
         if args.school_name or args.coordinator_name:
             if args.school_name and args.coordinator_name:
@@ -142,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 metric_workbook_path=metric_prefill,
                 uat=args.uat,
                 site_staff_list_path=site_staff_list,
-                use_site_staff_filter=not args.no_site_staff_filter,
+                use_site_staff_filter=use_site_staff_filter,
             )
         else:
             result = qpr.provision_all_site_templates(
@@ -154,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
                 metric_workbook_path=metric_prefill,
                 uat=args.uat,
                 site_staff_list_path=site_staff_list,
-                use_site_staff_filter=not args.no_site_staff_filter,
+                use_site_staff_filter=use_site_staff_filter,
             )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
