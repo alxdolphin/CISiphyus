@@ -75,16 +75,14 @@ cisiphyus accreditation \
 ```
 
 **QPR workbook provisioning**
-> Retrieve `student_metrics_summary` and generate per-site QPR import workbooks (`CIS_MONOREPO_ROOT` must point at the CIS checkout with `tools/qpr/qpr_tools.py`).
+> Retrieve `student_metrics_summary` and generate per-site QPR import workbooks using bundled tools and fixtures.
 
 ```bash
 python examples/qpr/qpr_provision.py examples/qpr/output \
-  --grading-period 2.0 \
-  --no-site-staff-filter
+  --grading-period 2.0
 # equivalent after pip install -e .:
 cisiphyus qpr examples/qpr/output \
-  --grading-period 2.0 \
-  --no-site-staff-filter
+  --grading-period 2.0
 ```
 
 ## CHANGELOG
