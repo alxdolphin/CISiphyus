@@ -250,8 +250,6 @@ def maybe_prefetch_student_metrics(
             require_fresh=require_fresh,
             allow_stale=allow_stale,
         )
-        if require_fresh and not allow_stale:
-            raise
         print(f"[qpr_cisiphyus_prefetch] refresh failed ({reason}): {exc}", file=sys.stderr)
         resolved = destination if destination.exists() else None
         return PrefetchResult(

@@ -25,6 +25,14 @@ def repo_root() -> Path:
 
 
 def _run_example_module(*, example_dir: Path, module_name: str, argv: list[str]) -> int:
+    if not example_dir.is_dir():
+        print(
+            f"Error: Example directory not found at {example_dir}\n"
+            "This command is only available when running from a repository checkout "
+            "(e.g., pip install -e .).",
+            file=sys.stderr,
+        )
+        return 1
     if str(example_dir) not in sys.path:
         sys.path.insert(0, str(example_dir))
     module = __import__(module_name)

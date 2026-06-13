@@ -2,7 +2,7 @@
 
 let
   # WHY: pip playwright revision must match nixpkgs playwright-driver.browsers
-  playwrightPipVersion = pkgs.python313Packages.playwright.version;
+  playwrightPipVersion = pkgs.python311Packages.playwright.version;
 in
 
 pkgs.mkShell {
