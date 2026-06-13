@@ -3,6 +3,8 @@
 # usage:
 #   python run.py student_metrics_summary
 #   python run.py --bootstrap
+#   cisiphyus accreditation --output-dir ...
+#   cisiphyus qpr <output_dir> --grading-period 2.0 ...
 # required: config/reports.yaml, config/export_urls.env
 # outputs: artifacts/latest/<report_id>/raw.xlsx
 
@@ -11,20 +13,20 @@ from __future__ import annotations
 import argparse
 import sys
 
-from playwright.sync_api import sync_playwright
-
-import bootstrap
 import config
-import report
-from artifacts import RunResult
-
-# re-exports for tests and downstream introspection
-dismiss_blocking_dialogs = bootstrap.dismiss_blocking_dialogs
-verify_cisdm_auth = bootstrap.verify_cisdm_auth
-classify_auth_probe = bootstrap.classify_auth_probe
+import example_cli
 
 
-def print_summary(result: RunResult) -> None:
+def __getattr__(name: str):
+    # WHY: keep example dispatch import-light; tests introspect bootstrap via cli
+    if name in {"dismiss_blocking_dialogs", "verify_cisdm_auth", "classify_auth_probe"}:
+        import bootstrap
+
+        return getattr(bootstrap, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def print_summary(result) -> None:
     if result.status != "success":
         latest_dir = config.latest_report_dir(result.report_id)
         result_path = latest_dir / "result.json"
@@ -38,6 +40,15 @@ def print_summary(result: RunResult) -> None:
 
 def main() -> None:
     config.migrate_legacy_layout()
+
+    example_code = example_cli.maybe_run_example_app(sys.argv)
+    if example_code is not None:
+        raise SystemExit(example_code)
+
+    from playwright.sync_api import sync_playwright
+
+    import bootstrap
+    import report
 
     parser = argparse.ArgumentParser(
         description="Retrieve CISDM exports using a Chrome work profile."
