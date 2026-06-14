@@ -318,22 +318,6 @@ def maybe_prefetch_student_metrics(
         )
 
 
-def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-    try:
-        require_fresh = argv_requires_fresh_metrics(argv)
-        maybe_prefetch_student_metrics(argv, require_fresh=require_fresh)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        print(f"[qpr] error: {exc}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 # --- provision CLI ---
 
 def resolve_metric_workbook(explicit: Path | None) -> Path:
