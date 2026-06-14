@@ -22,7 +22,7 @@ CISiphyus automates the retrieval of CISDM reports, enabling scripted, repeatabl
 git clone https://github.com/alxdolphin/CISiphyus.git
 cd CISiphyus
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt && playwright install chromium
+pip install -e . && playwright install chromium
 
 # OR
 
@@ -45,7 +45,7 @@ For each export / report you want to retrieve, you need to get the URL from CISD
 **Authentication**
 
 ```bash
-python run.py --bootstrap
+cisiphyus --bootstrap
 ```
 
 The CISDM session is persisted in `config/chrome-user-data/` (Playwright profile `Profile 1`) and reused on every later run. Log in via the browser, then press Enter in the terminal.
@@ -53,9 +53,9 @@ The CISDM session is persisted in `config/chrome-user-data/` (Playwright profile
 ## USAGE
 
 ```bash
-python run.py student_metrics_summary # Retrieve Metrics Tracking (All) export
-# equivalent after pip install -e .:
-cisiphyus student_metrics_summary
+# Pull raw exports by report ID (according to `config/reports.yaml`)
+cisiphyus pull accreditation
+cisiphyus pull student_metrics_summary
 ```
 
 ## EXAMPLES
@@ -66,35 +66,39 @@ CISiphyus allows for a variety of downstream applications to improve operations.
 > Retrieve `accreditation` report and flag site-level compliance issues (reporting gaps, Tier I counts, case-management completeness).
 
 ```bash
-python examples/accreditation/accreditation_monitor.py \
-  --output-dir examples/accreditation/local_inputs/monitor-out
-
-# equivalent after pip install -e .
-cisiphyus accreditation \
-  --output-dir examples/accreditation/local_inputs/monitor-out
+cisiphyus audit accreditation
 ```
 
-**QPR workbook provisioning**
+**Audit Student Metrics**
+> Retrieve `student_metrics_summary` and flag row-level data-quality issues.
+
+```bash
+cisiphyus audit metrics
+```
+
+**Provision Quarterly Progress Reports**
 > Retrieve `student_metrics_summary` and generate per-site QPR import workbooks using bundled tools and fixtures.
 
 ```bash
-python examples/qpr/qpr_provision.py examples/qpr/output \
-  --grading-period 2.0
-# equivalent after pip install -e .:
-cisiphyus qpr examples/qpr/output \
-  --grading-period 2.0
+cisiphyus qpr --grading-period 2.0
 ```
 
 ## CHANGELOG
+
+* 0.4.0
+  * Group downstream audits under `cisiphyus audit accreditation` and `cisiphyus audit metrics`
+  * Add `cisiphyus pull <report_id>` for raw exports
+  * Default example outputs to `artifacts/<app>/` (override with `*_OUTPUT_DIR` env vars)
+  * Consolidate accreditation example into single `accreditation.py` (fetch, parse, rules, CLI)
+  * Consolidate QPR example into `qpr.py` (fetch, loader, provision CLI); keep `qpr_tools.py` as bundled library
 
 * 0.3.0
   * Add `examples/` directory with prototypical downstream applications
 
 * 0.2.0
-
   * Verify `Auth_CaseWorthy` / `Context_CaseWorthy` and export them to `config/CISDM_cookies.json` during bootstrap
   * Failures now write `result.json` / `diag.json` with redacted cookie inventories for diagnosis
   * Removed legacy `session.py` cookie-overlay module (superseded by bootstrap-generated export)
-* 0.1.0
 
+* 0.1.0
   * Initial Release

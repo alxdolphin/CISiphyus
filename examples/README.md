@@ -40,29 +40,26 @@ import workbooks (`.xlsx`) using bundled [`qpr_tools.py`](qpr/qpr_tools.py) prov
 logic and default fixtures under `examples/qpr/fixtures/`.
 
 ```bash
-python examples/qpr/qpr_provision.py /tmp/qpr-provision-out --grading-period 2.0
+cisiphyus qpr --grading-period 2.0
 ```
 
 Single site:
 
 ```bash
-python examples/qpr/qpr_provision.py /tmp/qpr-provision-out \
-  --grading-period 2.0 \
-  --school-name "Lincoln HS"
+cisiphyus qpr --grading-period 2.0 --school-name "Lincoln HS"
 ```
 
 Override bundled template, deadlines, or site-staff inputs when your affiliate uses
 local workbooks:
 
 ```bash
-python examples/qpr/qpr_provision.py /tmp/qpr-provision-out \
-  --grading-period 2.0 \
+cisiphyus qpr --grading-period 2.0 \
   --template /path/to/QPR_Import_Template.xlsx \
   --deadlines /path/to/ReportingDeadlines.xlsx \
   --site-staff-list /path/to/Site_Staff_List.xlsx
 ```
 
-Outputs: `{output}/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
+Outputs: `artifacts/qpr/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 
 ## environment variables
 
@@ -73,6 +70,7 @@ Outputs: `{output}/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 | `ACCREDITATION_WORKBOOK` / `ACCREDITATION_LOCAL_INPUTS_DIR` | Accreditation workbook destination |
 | `ACCREDITATION_MAX_AGE_HOURS` | Freshness gate for the accreditation workbook (default 24) |
 | `QPR_STUDENT_METRICS_WORKBOOK` / `QPR_LOCAL_INPUTS_DIR` | Student metrics workbook destination |
+| `QPR_OUTPUT_DIR` | QPR provision output root (default `artifacts/qpr/`) |
 | `QPR_FETCH_STUDENT_METRICS` | `1` to force a refresh even when fresh |
 
 ## tests
