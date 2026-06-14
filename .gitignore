@@ -26,11 +26,7 @@ CISDM_cookies.json
 reportviewer*.html
 
 # downstream example fixtures are synthetic and safe to track
-!examples/accreditation/fixtures/*.xlsx
 !examples/qpr/fixtures/*.xlsx
-# example demos write workbooks/outputs here at runtime
-examples/*/local_inputs/
-examples/qpr/output/
 
 # --- python / packaging ---
 __pycache__/
@@ -59,5 +55,8 @@ latest_result.json
 config/reports.yaml
 
 # --- local-only (never commit) ---
-tests/
+tests/*
+!tests/test_examples_*.py
 docs/
+examples/accreditation/local_inputs/monitor-out/monitoring_summary.json
+examples/accreditation/local_inputs/monitor-out/monitoring_summary.md
