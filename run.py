@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run cisiphyus from the repository root without a prior install."""
+"""Development entrypoint when the package is not installed (`pip install -e .`). Prefer `cisiphyus`."""
 
 from __future__ import annotations
 

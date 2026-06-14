@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # cisiphyus: chrome-profile cisdm export retriever (report fetch + bootstrap)
 # usage:
-#   python run.py student_metrics_summary
-#   python run.py --bootstrap
-#   cisiphyus accreditation --output-dir ...
-#   cisiphyus qpr <output_dir> --grading-period 2.0 ...
+#   cisiphyus student_metrics_summary
+#   cisiphyus pull accreditation
+#   cisiphyus --bootstrap
+#   cisiphyus audit accreditation
+#   cisiphyus audit metrics
+#   cisiphyus qpr --grading-period 2.0 ...
 # required: config/reports.yaml, config/export_urls.env
 # outputs: artifacts/latest/<report_id>/raw.xlsx
 
@@ -38,20 +40,10 @@ def print_summary(result) -> None:
         sys.exit(1)
 
 
-def main() -> None:
-    config.migrate_legacy_layout()
-
-    example_code = example_cli.maybe_run_example_app(sys.argv)
-    if example_code is not None:
-        raise SystemExit(example_code)
-
-    from playwright.sync_api import sync_playwright
-
-    import bootstrap
-    import report
-
+def _build_retrieval_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Retrieve CISDM exports using a Chrome work profile."
+        description="Retrieve CISDM exports using a Chrome work profile.",
+        prog=prog,
     )
     parser.add_argument("report_id", nargs="?", default="student_metrics_summary")
     parser.add_argument(
@@ -75,8 +67,16 @@ def main() -> None:
         metavar="REPORT_ID",
         help="Optional: probe a report URL during bootstrap (e.g. accreditation).",
     )
+    return parser
 
-    args = parser.parse_args()
+
+def _run_retrieval(argv: list[str], *, prog: str | None = None) -> None:
+    from playwright.sync_api import sync_playwright
+
+    import bootstrap
+    import report
+
+    args = _build_retrieval_parser(prog=prog).parse_args(argv)
     chrome_user_data_dir = config.default_chrome_user_data_dir()
     chrome_profile_directory = config.DEFAULT_CHROME_PROFILE_DIRECTORY
     verify_report = (args.verify_report or "").strip() or None
@@ -98,6 +98,27 @@ def main() -> None:
         )
 
     print_summary(result)
+
+
+def _maybe_run_pull(argv: list[str]) -> bool:
+    # WHY: monitor runs via `audit accreditation`; raw export uses `pull <id>`
+    if len(argv) < 3 or argv[1] != "pull":
+        return False
+    _run_retrieval(argv[2:], prog="cisiphyus pull")
+    return True
+
+
+def main() -> None:
+    config.migrate_legacy_layout()
+
+    if _maybe_run_pull(sys.argv):
+        return
+
+    example_code = example_cli.maybe_run_example_app(sys.argv)
+    if example_code is not None:
+        raise SystemExit(example_code)
+
+    _run_retrieval(sys.argv[1:])
 
 
 if __name__ == "__main__":

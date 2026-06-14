@@ -30,7 +30,7 @@ LATEST_DIR = ARTIFACTS / "latest"
 AUTH_BOOTSTRAP_MARKER_NAME = ".cisiphyus_auth_bootstrap.json"
 COOKIES_EXPORT_PATH = CONFIG_DIR / "CISDM_cookies.json"
 DEFAULT_CHROME_PROFILE_DIRECTORY = "Profile 1"
-BOOTSTRAP_COMMAND = "python run.py --bootstrap"
+BOOTSTRAP_COMMAND = "cisiphyus --bootstrap"
 
 BASE_URL = "https://cw.caseworthy.net/cis_prod.caseworthy"
 DOWNLOAD_TIMEOUT_MS = 300_000

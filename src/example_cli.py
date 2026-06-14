@@ -5,19 +5,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ACCREDITATION_MONITOR_FLAGS = frozenset(
-    {
-        "--workbook",
-        "--force-fetch",
-        "--fetch-destination",
-        "--include-inactive-sites",
-        "--output-dir",
-        "--reporting-rule",
-        "--reporting-threshold",
-        "--include-ok-sites",
-        "--json",
-    }
-)
+AUDIT_USAGE = """usage: cisiphyus audit <target> [options]
+
+targets:
+  accreditation   Site-level accreditation compliance monitoring
+  metrics         Student metrics summary row-level audit
+"""
 
 
 def repo_root() -> Path:
@@ -42,15 +35,40 @@ def _run_example_module(*, example_dir: Path, module_name: str, argv: list[str])
 def run_accreditation_monitor(argv: list[str]) -> int:
     return _run_example_module(
         example_dir=repo_root() / "examples" / "accreditation",
-        module_name="accreditation_monitor",
+        module_name="accreditation",
         argv=argv,
     )
+
+
+def run_metrics_audit(argv: list[str]) -> int:
+    return _run_example_module(
+        example_dir=repo_root() / "examples" / "audit",
+        module_name="audit",
+        argv=argv,
+    )
+
+
+def run_audit_app(argv: list[str]) -> int:
+    if not argv or argv[0] in ("--help", "-h"):
+        print(AUDIT_USAGE, file=sys.stderr)
+        return 0 if argv and argv[0] in ("--help", "-h") else 1
+
+    target = argv[0]
+    rest = argv[1:]
+    if target == "accreditation":
+        return run_accreditation_monitor(rest)
+    if target == "metrics":
+        return run_metrics_audit(rest)
+
+    print(f"Error: unknown audit target {target!r}. Use 'accreditation' or 'metrics'.", file=sys.stderr)
+    print(AUDIT_USAGE, file=sys.stderr)
+    return 1
 
 
 def run_qpr_provision(argv: list[str]) -> int:
     return _run_example_module(
         example_dir=repo_root() / "examples" / "qpr",
-        module_name="qpr_provision",
+        module_name="qpr",
         argv=argv,
     )
 
@@ -64,17 +82,7 @@ def maybe_run_example_app(argv: list[str]) -> int | None:
     if command == "qpr":
         return run_qpr_provision(rest)
 
-    if command == "accreditation" and _has_accreditation_monitor_flag(rest):
-        return run_accreditation_monitor(rest)
+    if command == "audit":
+        return run_audit_app(rest)
 
     return None
-
-
-def _has_accreditation_monitor_flag(argv: list[str]) -> bool:
-    for token in argv:
-        flag = token.split("=", 1)[0]
-        if flag in ("--help", "-h"):
-            return True
-        if flag in ACCREDITATION_MONITOR_FLAGS:
-            return True
-    return False
