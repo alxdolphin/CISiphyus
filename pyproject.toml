@@ -29,7 +29,6 @@ py-modules = [
     "browser",
     "cli",
     "config",
-    "example_cli",
     "fetch",
     "report",
     "url_refresh",
