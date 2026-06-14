@@ -274,7 +274,7 @@ GRADING_PERIOD_HEADERS = (
     "3rd Grading Period",
     "4th Grading Period",
     "5th Grading Period",
-    "6th Grading period",
+    "6th Grading Period",
 )
 
 RecordValue: TypeAlias = str | None | int
