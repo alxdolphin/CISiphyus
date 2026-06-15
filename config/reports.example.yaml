@@ -1,7 +1,14 @@
+# WHY: CISEPA enrollment-program IDs are empirical — verify each new SY before adding
+school_year_programs:
+  SY24-25: 1330
+  SY25-26: 1331
+
 reports:
   student_metrics_summary:
     display_name: "Student Metrics Summary"
     url_env: "CISDM_STUDENT_METRICS_EXPORT_URL"
+    year_scope:
+      param: "@Enrollment_ProgramID"
     # optional: Form.aspx module page visited before export to establish app context
     context_url_env: "CISDM_STUDENT_METRICS_CONTEXT_URL"
     expected_extension: ".xlsx"
