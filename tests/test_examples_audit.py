@@ -175,10 +175,20 @@ def test_cisiphyus_cmd_matches_slim_cli(monkeypatch) -> None:
     monkeypatch.delenv("AUDIT_CISPHYUS_HEADED", raising=False)
     monkeypatch.delenv("CISPHYUS_HEADED", raising=False)
     cmd = audit._cisiphyus_cmd(REPO_ROOT)
-    assert cmd == [sys.executable, str(REPO_ROOT / "run.py"), "student_metrics_summary"]
+    assert cmd == [
+        sys.executable,
+        str(REPO_ROOT / "run.py"),
+        "pull",
+        "student_metrics_summary",
+    ]
 
     monkeypatch.setenv("CISPHYUS_HEADED", "1")
     assert audit._cisiphyus_cmd(REPO_ROOT)[-1] == "--headed"
+
+    assert audit._cisiphyus_cmd(REPO_ROOT, school_year="SY24-25")[-2:] == [
+        "--school-year",
+        "SY24-25",
+    ]
 
 
 def test_cli_resolves_workbook_via_cisiphyus_fetch(tmp_path: Path, monkeypatch) -> None:
