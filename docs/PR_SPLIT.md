@@ -1,34 +1,23 @@
-# PR split: `feat/school-year-scoped-exports`
+# PR split: school-year scoped exports
 
-The original branch combined ~6,600 LOC across unrelated features. Merge via three
-reviewable pull requests:
+`main` already includes downstream example apps (PR 2) and the Nix dev environment
+(PR 3). The remaining work is school-year scoped CISDM export plumbing.
 
-## PR 1 — School-year scoped exports (`feat/school-year-scoping`)
+## PR 1 — School-year scoped exports (`feat/school-year-scoping`) — **open**
 
-Core CISDM export plumbing:
+Core CISDM export plumbing plus review fixes:
 
-- `src/config.py`, `src/report.py`, `src/url_refresh.py`, `src/artifacts.py`
-- `src/cli.py` (pull subcommand, `--school-year`, failure-path fix; no example dispatch)
+- `src/config.py`, `src/report.py`, `src/url_refresh.py`, `src/artifacts.py`, `src/cli.py`
 - `config/reports.example.yaml`, `config/export_urls.env.example`
 - `tests/test_school_year_scoping.py`, `.gitignore` test allowlist
 - `README.md` school-year documentation
+- Example integration: `examples/_cisiphyus_fetch.py`, `--school-year` on audit/qpr,
+  standardized `pull` subcommand
 
-## PR 2 — Downstream example apps (`feat/downstream-examples`)
+## PR 2 — Downstream example apps — **merged to `main`**
 
-Stacks on PR 1:
-
-- `examples/` (accreditation, audit, qpr, `_cisiphyus_fetch.py`)
-- `src/example_cli.py`, full `src/cli.py` with audit/qpr dispatch
-- `run.py`, `pyproject.toml`
-- `tests/test_examples_*.py`, `examples/README.md`
-
-## PR 3 — Nix dev environment (`chore/nix-dev`)
-
-Independent chore off `main`:
-
-- `flake.nix`, `flake.lock`, `shell.nix`
+## PR 3 — Nix dev environment — **merged to `main`**
 
 ## Integration branch
 
-`feat/school-year-scoped-exports` retains the full combined branch for reference until
-the split PRs land.
+`feat/school-year-scoped-exports` retains the full combined branch history for reference.
