@@ -56,7 +56,40 @@ The CISDM session is persisted in `config/chrome-user-data/` (Playwright profile
 # Pull raw exports by report ID (according to `config/reports.yaml`)
 cisiphyus pull accreditation
 cisiphyus pull student_metrics_summary
+
+# Pull a historical school year (year-scoped direct exports only)
+cisiphyus pull student_metrics_summary --school-year SY24-25
 ```
+
+### School-year scoped exports
+
+Reports with `year_scope` in `config/reports.yaml` (for example
+`student_metrics_summary`) inject the enrollment program ID for the selected school
+year into the CISDM export URL.
+
+Configure school years in `config/reports.yaml`:
+
+```yaml
+school_year_programs:
+  SY24-25: 1330
+  SY25-26: 1331
+```
+
+| Setting | Purpose |
+| --- | --- |
+| `--school-year SYxx-yy` | Override the school year for this pull |
+| `CISDM_DEFAULT_SCHOOL_YEAR` | Default year when `--school-year` is omitted (must appear in `school_year_programs`) |
+| (implicit default) | Latest school year in `school_year_programs` when env is unset |
+
+**Output layout**
+
+| Pull | Output path |
+| --- | --- |
+| Default / current school year | `artifacts/latest/<report_id>/raw.xlsx` |
+| Non-default school year | `artifacts/archives/<SY>/pulls/<report_id>/raw.xlsx` |
+
+Each run writes `result.json` (and `diag.json` on failure) alongside `raw.xlsx`.
+Failures for archived pulls are written under the archive path, not `artifacts/latest/`.
 
 ## EXAMPLES
 

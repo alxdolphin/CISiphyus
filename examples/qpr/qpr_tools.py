@@ -25,7 +25,22 @@ PROJECT_ROOT = REPO_ROOT
 DEFAULT_TEMPLATE_PATH = FIXTURES_DIR / "qpr_import_template.xlsx"
 DEFAULT_DEADLINES_PATH = FIXTURES_DIR / "reporting_deadlines_minimal.xlsx"
 DEFAULT_QPR_LOCAL_INPUTS_DIR = LOCAL_INPUTS_DIR
-DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
+_EXAMPLES_DIR = QPR_DIR.parent
+
+
+def default_student_metrics_filename() -> str:
+    env_name = (os.environ.get("QPR_STUDENT_METRICS_FILENAME") or "").strip()
+    if env_name:
+        return env_name
+    if str(_EXAMPLES_DIR) not in sys.path:
+        sys.path.insert(0, str(_EXAMPLES_DIR))
+    import _cisiphyus_fetch as cis_fetch
+
+    year = cis_fetch.resolve_school_year(cisiphyus_root=REPO_ROOT)
+    return cis_fetch.student_metrics_filename(year)
+
+
+DEFAULT_STUDENT_METRICS_FILENAME = default_student_metrics_filename()
 DEFAULT_METRIC_WORKBOOK_PATH = DEFAULT_QPR_LOCAL_INPUTS_DIR / DEFAULT_STUDENT_METRICS_FILENAME
 DEFAULT_QPR_OUTPUT_DIR = REPO_ROOT / "artifacts" / "qpr"
 DEFAULT_SITE_STAFF_LIST_PATH = FIXTURES_DIR / "site_staff_list_minimal.xlsx"
