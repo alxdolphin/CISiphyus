@@ -65,17 +65,93 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-def load_reports(path: Path) -> dict:
+def load_reports_config(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Missing reports.yaml: {path}")
 
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
 
+    if not isinstance(data, dict):
+        raise ValueError("reports.yaml must be a mapping")
+    return data
+
+
+def load_reports(path: Path) -> dict:
+    data = load_reports_config(path)
     reports = data.get("reports")
     if not isinstance(reports, dict):
         raise ValueError("reports.yaml must contain top-level key: reports")
     return reports
+
+
+def load_school_year_programs(path: Path) -> dict[str, int]:
+    data = load_reports_config(path)
+    raw = data.get("school_year_programs", {})
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("school_year_programs must be a mapping")
+
+    programs: dict[str, int] = {}
+    for school_year, program_id in raw.items():
+        if not isinstance(school_year, str) or not school_year.strip():
+            raise ValueError("school_year_programs keys must be non-empty strings")
+        if isinstance(program_id, bool) or not isinstance(program_id, int):
+            raise ValueError(
+                f"school_year_programs[{school_year!r}] must be an integer program id"
+            )
+        programs[school_year.strip()] = program_id
+    return programs
+
+
+def _school_year_sort_key(school_year: str) -> tuple[int, int]:
+    label = school_year.strip().upper()
+    if not label.startswith("SY") or "-" not in label:
+        return (0, 0)
+    _, years = label.split("SY", 1)
+    start_text, end_text = years.split("-", 1)
+    try:
+        start_year = int(start_text)
+        end_year = int(end_text)
+    except ValueError:
+        return (0, 0)
+    if end_year < 100:
+        end_year += 2000
+    if start_year < 100:
+        start_year += 2000
+    return (end_year, start_year)
+
+
+def default_school_year(programs: dict[str, int]) -> str | None:
+    env_year = os.environ.get("CISDM_DEFAULT_SCHOOL_YEAR", "").strip()
+    if env_year:
+        if env_year not in programs:
+            raise ValueError(
+                f"CISDM_DEFAULT_SCHOOL_YEAR={env_year!r} is not in school_year_programs"
+            )
+        return env_year
+    if not programs:
+        return None
+    return max(programs, key=_school_year_sort_key)
+
+
+def resolve_program_id(programs: dict[str, int], school_year: str) -> int:
+    normalized = school_year.strip()
+    if normalized not in programs:
+        available = ", ".join(sorted(programs, key=_school_year_sort_key))
+        raise ValueError(
+            f"Unknown school year {school_year!r}. Available: {available or '(none)'}"
+        )
+    return programs[normalized]
+
+
+def archives_pull_dir(school_year: str, report_id: str) -> Path:
+    return ARTIFACTS / "archives" / school_year / "pulls" / report_id
+
+
+def archives_raw_path(school_year: str, report_id: str) -> Path:
+    return archives_pull_dir(school_year, report_id) / "raw.xlsx"
 
 
 def redact_url(url: str) -> str:

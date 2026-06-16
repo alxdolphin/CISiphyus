@@ -56,7 +56,7 @@ config/reports.yaml
 
 # --- local-only (never commit) ---
 tests/*
-!tests/test_examples_*.py
+!tests/test_*.py
 docs/
 examples/accreditation/local_inputs/monitor-out/monitoring_summary.json
 examples/accreditation/local_inputs/monitor-out/monitoring_summary.md

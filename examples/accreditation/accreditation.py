@@ -29,6 +29,10 @@ from typing import Any, Callable, Iterable, Literal
 from openpyxl import load_workbook
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+_EXAMPLES_DIR = SCRIPT_DIR.parent
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
+import _cisiphyus_fetch as cis_fetch
 
 
 def default_output_dir() -> Path:
@@ -129,21 +133,15 @@ def _env_first(*names: str) -> str:
 
 
 def _cisiphyus_cmd(cisiphyus_root: Path) -> list[str]:
-    # WHY: monitor runs via `audit accreditation`; raw export uses `pull accreditation`
-    run_py = cisiphyus_root / "run.py"
-    cmd: list[str] = [sys.executable, str(run_py), "pull", CISIPHYUS_REPORT_ID]
-
-    headed = _flag_true(
-        _env_first("ACCREDITATION_CISPHYUS_HEADED", "CISPHYUS_HEADED")
+    return cis_fetch.cisiphyus_pull_cmd(
+        cisiphyus_root,
+        CISIPHYUS_REPORT_ID,
+        headed_env_names=("ACCREDITATION_CISPHYUS_HEADED", "CISPHYUS_HEADED"),
     )
-    if headed:
-        cmd.append("--headed")
-
-    return cmd
 
 
 def _cisiphyus_latest_raw(cisiphyus_root: Path) -> Path:
-    return cisiphyus_root / "artifacts" / "latest" / CISIPHYUS_REPORT_ID / "raw.xlsx"
+    return cis_fetch.cisiphyus_raw_path(cisiphyus_root, CISIPHYUS_REPORT_ID)
 
 
 def _run_cisiphyus_export(

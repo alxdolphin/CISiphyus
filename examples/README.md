@@ -10,6 +10,7 @@ pin a local file for CI or reproducible reruns.
 | Application | CISiphyus report | Output |
 |---|---|---|
 | Accreditation monitoring | `accreditation` | Site flag CSVs / summaries |
+| Student metrics audit | `student_metrics_summary` | Row-level audit CSVs / JSON |
 | QPR provisioning | `student_metrics_summary` | Per-site `Q{n}_{Site}_QPR.xlsx` |
 
 ## accreditation site monitoring (`accreditation/`)
@@ -19,19 +20,33 @@ compliance issues: site-coordination reporting gaps, Tier I support counts, and
 case-management completeness.
 
 ```bash
-python examples/accreditation/accreditation_monitor.py --output-dir /tmp/accreditation-out
+cisiphyus audit accreditation
 ```
 
 Force a fresh export even when the cached workbook is still within the 24h gate:
 
 ```bash
-python examples/accreditation/accreditation_monitor.py \
-  --output-dir /tmp/accreditation-out \
-  --force-fetch
+cisiphyus audit accreditation --force-fetch
 ```
 
 Outputs: `all_flags.csv`, `sc_flags.csv`, `cm_flags.csv`, `tier1_flags.csv`,
 `monitoring_summary.json`, `monitoring_summary.md`.
+
+## student metrics audit (`audit/`)
+
+Retrieves `student_metrics_summary` and flags row-level data-quality issues (invalid
+metric/scale combinations, duplicate keys, and related checks).
+
+```bash
+cisiphyus audit metrics
+```
+
+Pin a local workbook or pull a specific school year:
+
+```bash
+cisiphyus audit metrics --workbook path/to/StudentMetricsSummary.xlsx
+cisiphyus audit metrics --school-year SY24-25
+```
 
 ## qpr workbook provisioning (`qpr/`)
 
@@ -59,6 +74,12 @@ cisiphyus qpr --grading-period 2.0 \
   --site-staff-list /path/to/Site_Staff_List.xlsx
 ```
 
+Historical school year:
+
+```bash
+cisiphyus qpr --grading-period 2.0 --school-year SY24-25
+```
+
 Outputs: `artifacts/qpr/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 
 ## environment variables
@@ -67,11 +88,17 @@ Outputs: `artifacts/qpr/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 |---|---|
 | `CISIPHYUS_ROOT` | Override the cisiphyus repo root (default: this repo) |
 | `CISPHYUS_HEADED` | `1` to show the browser during cisiphyus retrieval |
+| `CISDM_DEFAULT_SCHOOL_YEAR` | Default school year for pulls and example apps |
 | `ACCREDITATION_WORKBOOK` / `ACCREDITATION_LOCAL_INPUTS_DIR` | Accreditation workbook destination |
 | `ACCREDITATION_MAX_AGE_HOURS` | Freshness gate for the accreditation workbook (default 24) |
-| `QPR_STUDENT_METRICS_WORKBOOK` / `QPR_LOCAL_INPUTS_DIR` | Student metrics workbook destination |
+| `AUDIT_STUDENT_METRICS_FILENAME` / `AUDIT_LOCAL_INPUTS_DIR` | Student metrics workbook destination for audit |
+| `QPR_STUDENT_METRICS_WORKBOOK` / `QPR_LOCAL_INPUTS_DIR` | Student metrics workbook destination for QPR |
 | `QPR_OUTPUT_DIR` | QPR provision output root (default `artifacts/qpr/`) |
 | `QPR_FETCH_STUDENT_METRICS` | `1` to force a refresh even when fresh |
+
+Example apps use `cisiphyus pull <report_id>` under the hood. When `--school-year` is
+omitted, they follow `CISDM_DEFAULT_SCHOOL_YEAR` or the latest year in
+`config/reports.yaml`.
 
 ## tests
 

@@ -30,6 +30,10 @@ from typing import Any, Callable, Literal, TypeAlias
 from openpyxl import load_workbook
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+_EXAMPLES_DIR = SCRIPT_DIR.parent
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
+import _cisiphyus_fetch as cis_fetch
 
 
 def default_output_dir() -> Path:
@@ -43,7 +47,6 @@ def default_output_dir() -> Path:
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 STUDENT_METRICS_MAX_AGE_HOURS = 24.0
 CISIPHYUS_REPORT_ID = "student_metrics_summary"
-DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ def _default_local_inputs_dir() -> Path:
 def preferred_student_metrics_workbook(
     *,
     local_inputs_dir: Path | None = None,
+    school_year: str | None = None,
 ) -> Path:
     explicit = (os.environ.get("AUDIT_STUDENT_METRICS_WORKBOOK") or "").strip()
     if explicit:
@@ -78,10 +82,12 @@ def preferred_student_metrics_workbook(
         os.environ.get("AUDIT_LOCAL_INPUTS_DIR", "").strip()
         or str(local_inputs_dir or _default_local_inputs_dir())
     ).expanduser().resolve()
-    name = (
-        os.environ.get("AUDIT_STUDENT_METRICS_FILENAME", "").strip()
-        or DEFAULT_STUDENT_METRICS_FILENAME
-    )
+    name = (os.environ.get("AUDIT_STUDENT_METRICS_FILENAME") or "").strip()
+    if not name:
+        resolved_year = school_year or cis_fetch.resolve_school_year(
+            cisiphyus_root=_default_cisiphyus_root()
+        )
+        name = cis_fetch.student_metrics_filename(resolved_year)
     return (base / name).resolve()
 
 
@@ -129,43 +135,52 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-def _cisiphyus_cmd(cisiphyus_root: Path) -> list[str]:
-    run_py = cisiphyus_root / "run.py"
-    cmd: list[str] = [sys.executable, str(run_py), CISIPHYUS_REPORT_ID]
-    headed = _flag_true(
-        _env_first("AUDIT_CISPHYUS_HEADED", "CISPHYUS_HEADED")
+def _cisiphyus_cmd(cisiphyus_root: Path, *, school_year: str | None = None) -> list[str]:
+    return cis_fetch.cisiphyus_pull_cmd(
+        cisiphyus_root,
+        CISIPHYUS_REPORT_ID,
+        school_year=school_year,
+        headed_env_names=("AUDIT_CISPHYUS_HEADED", "CISPHYUS_HEADED"),
     )
-    if headed:
-        cmd.append("--headed")
-    return cmd
 
 
-def _cisiphyus_latest_raw(cisiphyus_root: Path) -> Path:
-    return cisiphyus_root / "artifacts" / "latest" / CISIPHYUS_REPORT_ID / "raw.xlsx"
+def _cisiphyus_latest_raw(
+    cisiphyus_root: Path,
+    *,
+    school_year: str | None = None,
+) -> Path:
+    default_year = cis_fetch.load_default_school_year(cisiphyus_root)
+    return cis_fetch.cisiphyus_raw_path(
+        cisiphyus_root,
+        CISIPHYUS_REPORT_ID,
+        school_year=school_year,
+        default_school_year=default_year,
+    )
 
 
 def _run_cisiphyus_export(
     *,
     cisiphyus_root: Path,
     run: Callable[..., Any],
+    school_year: str | None = None,
 ) -> Path:
     run_py = cisiphyus_root / "run.py"
     if not run_py.is_file():
         raise FileNotFoundError(f"cisiphyus run.py not found at {run_py}")
 
     completed = run(
-        _cisiphyus_cmd(cisiphyus_root),
+        _cisiphyus_cmd(cisiphyus_root, school_year=school_year),
         cwd=str(cisiphyus_root),
         check=False,
         env=os.environ.copy(),
     )
     if getattr(completed, "returncode", 1) != 0:
         raise RuntimeError(
-            f"cisiphyus {CISIPHYUS_REPORT_ID} failed with exit code "
+            f"cisiphyus pull {CISIPHYUS_REPORT_ID} failed with exit code "
             f"{getattr(completed, 'returncode', 'unknown')}"
         )
 
-    raw = _cisiphyus_latest_raw(cisiphyus_root)
+    raw = _cisiphyus_latest_raw(cisiphyus_root, school_year=school_year)
     if not raw.is_file():
         raise FileNotFoundError(f"expected cisiphyus output missing: {raw}")
     return raw
@@ -176,10 +191,14 @@ def fetch_student_metrics_workbook(
     destination: Path | None = None,
     force_fetch: bool = False,
     require_fresh: bool = False,
+    school_year: str | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> FetchResult:
     """Fetch student metrics summary from CISDM when missing, stale, or forced."""
-    target = (destination or preferred_student_metrics_workbook()).resolve()
+    target = (
+        destination
+        or preferred_student_metrics_workbook(school_year=school_year)
+    ).resolve()
     env_force = _flag_true(os.environ.get("AUDIT_FETCH_FROM_CISDM"))
     should_fetch, reason = _fetch_reason(destination=target, force_fetch=force_fetch or env_force)
 
@@ -202,7 +221,11 @@ def fetch_student_metrics_workbook(
     ).expanduser().resolve()
 
     try:
-        raw = _run_cisiphyus_export(cisiphyus_root=cisiphyus_root, run=run)
+        raw = _run_cisiphyus_export(
+            cisiphyus_root=cisiphyus_root,
+            run=run,
+            school_year=school_year,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(raw, target)
 
@@ -1105,6 +1128,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where to save the CISDM export (default: artifacts/audit/).",
     )
     parser.add_argument(
+        "--school-year",
+        default=None,
+        metavar="SYxx-yy",
+        help="School year for cisiphyus pull (default: CISDM_DEFAULT_SCHOOL_YEAR or reports.yaml).",
+    )
+    parser.add_argument(
         "--sheet",
         default=DEFAULT_SHEET,
         help=f"Worksheet name (default {DEFAULT_SHEET}).",
@@ -1130,12 +1159,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.workbook:
         workbooks.extend(args.workbook)
     else:
-        destination = args.fetch_destination or preferred_student_metrics_workbook()
+        destination = args.fetch_destination or preferred_student_metrics_workbook(
+            school_year=args.school_year,
+        )
         try:
             fetch_result = fetch_student_metrics_workbook(
                 destination=destination,
                 force_fetch=args.force_fetch,
                 require_fresh=True,
+                school_year=args.school_year,
             )
         except (FileNotFoundError, OSError, RuntimeError) as exc:
             print(f"error: CISDM fetch failed: {exc}", file=sys.stderr)

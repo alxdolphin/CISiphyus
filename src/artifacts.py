@@ -19,6 +19,9 @@ class RunResult:
     finished_at: str
     raw_path: str | None
     error: str | None = None
+    output_dir: str | None = None
+    school_year: str | None = None
+    enrollment_program_id: int | None = None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -35,6 +38,8 @@ def write_latest_result(
     raw_path: Path | None,
     error: str | None,
     latest_dir: Path,
+    school_year: str | None = None,
+    enrollment_program_id: int | None = None,
 ) -> RunResult:
     resolved_raw = str(raw_path.resolve()) if raw_path and raw_path.exists() else None
     result = RunResult(
@@ -44,6 +49,9 @@ def write_latest_result(
         finished_at=finished_at,
         raw_path=resolved_raw,
         error=error,
+        output_dir=str(latest_dir.resolve()),
+        school_year=school_year,
+        enrollment_program_id=enrollment_program_id,
     )
     latest_dir.mkdir(parents=True, exist_ok=True)
     write_json(latest_dir / "result.json", asdict(result))

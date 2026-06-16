@@ -26,6 +26,10 @@ from typing import Any, Callable, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
+_EXAMPLES_DIR = SCRIPT_DIR.parent
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
+import _cisiphyus_fetch as cis_fetch
 FIXTURES_DIR = SCRIPT_DIR / "fixtures"
 
 def qpr_tools_path() -> Path:
@@ -66,7 +70,7 @@ def default_site_staff_list_path() -> Path:
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 STUDENT_METRICS_MAX_AGE_HOURS = 24.0
-DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
+CISIPHYUS_REPORT_ID = "student_metrics_summary"
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,7 @@ def default_output_dir() -> Path:
 def preferred_student_metrics_destination(
     *,
     local_inputs_dir: Path | None = None,
+    school_year: str | None = None,
 ) -> Path:
     explicit = (os.environ.get("QPR_STUDENT_METRICS_WORKBOOK") or "").strip()
     if explicit:
@@ -108,10 +113,12 @@ def preferred_student_metrics_destination(
         os.environ.get("QPR_LOCAL_INPUTS_DIR", "").strip()
         or str(local_inputs_dir or _default_local_inputs_dir())
     ).expanduser().resolve()
-    name = (
-        os.environ.get("QPR_STUDENT_METRICS_FILENAME", "").strip()
-        or DEFAULT_STUDENT_METRICS_FILENAME
-    )
+    name = (os.environ.get("QPR_STUDENT_METRICS_FILENAME") or "").strip()
+    if not name:
+        resolved_year = school_year or cis_fetch.resolve_school_year(
+            cisiphyus_root=_default_cisiphyus_root()
+        )
+        name = cis_fetch.student_metrics_filename(resolved_year)
     return (base / name).resolve()
 
 
@@ -190,12 +197,13 @@ def _run_cisiphyus_export(
     *,
     cisiphyus_root: Path,
     run: Callable[..., Any],
+    school_year: str | None = None,
 ) -> Path:
     run_py = cisiphyus_root / "run.py"
     if not run_py.is_file():
         raise FileNotFoundError(f"cisiphyus run.py not found at {run_py}")
 
-    cmd = _cisiphyus_cmd(cisiphyus_root)
+    cmd = _cisiphyus_cmd(cisiphyus_root, school_year=school_year)
     completed = run(
         cmd,
         cwd=str(cisiphyus_root),
@@ -204,26 +212,29 @@ def _run_cisiphyus_export(
     )
     if getattr(completed, "returncode", 1) != 0:
         raise RuntimeError(
-            f"cisiphyus student_metrics_summary failed with exit code "
+            f"cisiphyus pull {CISIPHYUS_REPORT_ID} failed with exit code "
             f"{getattr(completed, 'returncode', 'unknown')}"
         )
 
-    raw = cisiphyus_root / "artifacts" / "latest" / "student_metrics_summary" / "raw.xlsx"
+    default_year = cis_fetch.load_default_school_year(cisiphyus_root)
+    raw = cis_fetch.cisiphyus_raw_path(
+        cisiphyus_root,
+        CISIPHYUS_REPORT_ID,
+        school_year=school_year,
+        default_school_year=default_year,
+    )
     if not raw.is_file():
         raise FileNotFoundError(f"expected cisiphyus output missing: {raw}")
     return raw
 
 
-def _cisiphyus_cmd(cisiphyus_root: Path) -> list[str]:
-    # WHY: auth comes from the bootstrapped chrome profile (cisiphyus --bootstrap)
-    run_py = cisiphyus_root / "run.py"
-    cmd: list[str] = [sys.executable, str(run_py), "student_metrics_summary"]
-    headed = _flag_true(
-        os.environ.get("QPR_CISPHYUS_HEADED") or os.environ.get("CISPHYUS_HEADED")
+def _cisiphyus_cmd(cisiphyus_root: Path, *, school_year: str | None = None) -> list[str]:
+    return cis_fetch.cisiphyus_pull_cmd(
+        cisiphyus_root,
+        CISIPHYUS_REPORT_ID,
+        school_year=school_year,
+        headed_env_names=("QPR_CISPHYUS_HEADED", "CISPHYUS_HEADED"),
     )
-    if headed:
-        cmd.append("--headed")
-    return cmd
 
 
 def _enforce_fresh_after_refresh(
@@ -249,6 +260,7 @@ def maybe_prefetch_student_metrics(
     qpr_tools_argv: Sequence[str],
     *,
     require_fresh: bool | None = None,
+    school_year: str | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> PrefetchResult | None:
     """refresh student metrics via cisiphyus when missing, stale (>24h), or forced."""
@@ -258,7 +270,7 @@ def maybe_prefetch_student_metrics(
     if require_fresh is None:
         require_fresh = argv_requires_fresh_metrics(qpr_tools_argv)
 
-    destination = preferred_student_metrics_destination()
+    destination = preferred_student_metrics_destination(school_year=school_year)
     force_fetch = _flag_true(os.environ.get("QPR_FETCH_STUDENT_METRICS"))
     allow_stale = _flag_true(os.environ.get("QPR_ALLOW_STALE_METRICS"))
     should_fetch, reason = _fetch_reason(destination=destination, force_fetch=force_fetch)
@@ -284,7 +296,11 @@ def maybe_prefetch_student_metrics(
     ).expanduser().resolve()
 
     try:
-        raw = _run_cisiphyus_export(cisiphyus_root=cisiphyus_root, run=run)
+        raw = _run_cisiphyus_export(
+            cisiphyus_root=cisiphyus_root,
+            run=run,
+            school_year=school_year,
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(raw, destination)
         _enforce_fresh_after_refresh(
@@ -320,11 +336,15 @@ def maybe_prefetch_student_metrics(
 
 # --- provision CLI ---
 
-def resolve_metric_workbook(explicit: Path | None) -> Path:
+def resolve_metric_workbook(explicit: Path | None, *, school_year: str | None = None) -> Path:
     if explicit is not None:
         return explicit.expanduser().resolve()
-    preferred = preferred_student_metrics_destination()
-    result = maybe_prefetch_student_metrics(["provision-batch"], require_fresh=True)
+    preferred = preferred_student_metrics_destination(school_year=school_year)
+    result = maybe_prefetch_student_metrics(
+        ["provision-batch"],
+        require_fresh=True,
+        school_year=school_year,
+    )
     if result is not None and result.succeeded and result.destination is not None:
         return result.destination
     raise FileNotFoundError(
@@ -389,6 +409,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reporting deadlines workbook (default: examples/qpr/fixtures/reporting_deadlines_minimal.xlsx).",
     )
     parser.add_argument(
+        "--school-year",
+        default=None,
+        metavar="SYxx-yy",
+        help="School year for cisiphyus pull (default: CISDM_DEFAULT_SCHOOL_YEAR or reports.yaml).",
+    )
+    parser.add_argument(
         "--metric-workbook",
         type=Path,
         help="Student metrics summary (roster + metric prefill). When omitted, resolves via cisiphyus (age-gated).",
@@ -428,7 +454,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         qpr = load_qpr_tools()
-        metric_workbook = resolve_metric_workbook(args.metric_workbook)
+        metric_workbook = resolve_metric_workbook(
+            args.metric_workbook,
+            school_year=args.school_year,
+        )
         template_path = resolve_template_path(args.template)
         deadlines_path = (args.deadlines or default_deadlines_path()).expanduser().resolve()
         output_directory = (args.output_directory or default_output_dir()).resolve()

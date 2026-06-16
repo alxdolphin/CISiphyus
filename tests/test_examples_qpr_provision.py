@@ -40,6 +40,7 @@ def test_cisiphyus_cmd_matches_slim_cli(monkeypatch) -> None:
     assert cmd == [
         sys.executable,
         str(REPO_ROOT / "run.py"),
+        "pull",
         "student_metrics_summary",
     ]
 
@@ -52,7 +53,7 @@ def test_prefetch_skips_when_fresh(monkeypatch, tmp_path: Path) -> None:
     out_dir = tmp_path / "in"
     out_dir.mkdir(parents=True)
     monkeypatch.setenv("QPR_LOCAL_INPUTS_DIR", str(out_dir))
-    dest = out_dir / qpr.DEFAULT_STUDENT_METRICS_FILENAME
+    dest = qpr.preferred_student_metrics_destination(local_inputs_dir=out_dir)
     dest.write_bytes(b"fresh")
     calls: list[tuple] = []
 
@@ -73,7 +74,7 @@ def test_prefetch_refreshes_stale_workbook(monkeypatch, tmp_path: Path) -> None:
     out_dir = tmp_path / "in"
     out_dir.mkdir(parents=True)
     monkeypatch.setenv("QPR_LOCAL_INPUTS_DIR", str(out_dir))
-    dest = out_dir / qpr.DEFAULT_STUDENT_METRICS_FILENAME
+    dest = qpr.preferred_student_metrics_destination(local_inputs_dir=out_dir)
     dest.write_bytes(b"old")
     old = time.time() - (30 * 3600)
     import os
