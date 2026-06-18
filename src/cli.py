@@ -2,10 +2,11 @@
 # cisiphyus: chrome-profile cisdm export retriever (report fetch + bootstrap)
 # usage:
 #   cisiphyus student_metrics_summary
-#   cisiphyus pull accreditation
+#   cisiphyus pull student_metrics_summary --school-year SY24-25
 #   cisiphyus --bootstrap
 #   cisiphyus audit accreditation
 #   cisiphyus audit metrics
+#   cisiphyus trend SY25-26
 #   cisiphyus qpr --grading-period 2.0 ...
 # required: config/reports.yaml, config/export_urls.env
 # outputs: artifacts/latest/<report_id>/raw.xlsx
@@ -46,6 +47,12 @@ def _build_retrieval_parser(*, prog: str | None = None) -> argparse.ArgumentPars
         prog=prog,
     )
     parser.add_argument("report_id", nargs="?", default="student_metrics_summary")
+    parser.add_argument(
+        "--school-year",
+        default=None,
+        metavar="SYxx-yy",
+        help="School year for year-scoped direct exports (e.g. SY24-25).",
+    )
     parser.add_argument(
         "--headed",
         action="store_true",
@@ -95,6 +102,7 @@ def _run_retrieval(argv: list[str], *, prog: str | None = None) -> None:
             headed=args.headed,
             chrome_user_data_dir=chrome_user_data_dir,
             chrome_profile_directory=chrome_profile_directory,
+            school_year=(args.school_year or "").strip() or None,
         )
 
     print_summary(result)
