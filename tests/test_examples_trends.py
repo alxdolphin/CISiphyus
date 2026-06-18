@@ -449,3 +449,211 @@ def test_compare_summary_omits_related_work_section(tmp_path: Path) -> None:
     assert "Monday" not in md
     assert "monday.com" not in md
 
+
+def _write_cross_year_pair(
+    output_dir: Path,
+    *,
+    pair_name: str,
+    summary: dict[str, object],
+    movements: list[dict[str, object]],
+    regressions: list[dict[str, object]],
+) -> Path:
+    pair_dir = output_dir / "cross_year" / pair_name
+    pair_dir.mkdir(parents=True, exist_ok=True)
+    (pair_dir / "trend_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+    trends._write_movements_csv(pair_dir / "trend_movements.csv", movements)
+    trends._write_movements_csv(pair_dir / "regression_flags.csv", regressions)
+    return pair_dir
+
+
+def test_load_cross_year_summaries_sort_order(tmp_path: Path) -> None:
+    import visualize
+
+    output_dir = tmp_path / "trends"
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY23-24_EOY_vs_SY24-25_EOY",
+        summary={
+            "current_school_year": "SY24-25",
+            "baseline_school_year": "SY23-24",
+            "movement_count": 10,
+            "regression_count": 4,
+            "movements_by_type": {},
+        },
+        movements=[],
+        regressions=[],
+    )
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY17-18_EOY_vs_SY18-19_EOY",
+        summary={
+            "current_school_year": "SY18-19",
+            "baseline_school_year": "SY17-18",
+            "movement_count": 5,
+            "regression_count": 2,
+            "movements_by_type": {},
+        },
+        movements=[],
+        regressions=[],
+    )
+    summaries = visualize.load_cross_year_summaries(output_dir)
+    assert [row["current_school_year"] for row in summaries] == ["SY18-19", "SY24-25"]
+
+
+def test_aggregate_global_metrics_and_school_regressions(tmp_path: Path) -> None:
+    import visualize
+
+    pair_dir = _write_cross_year_pair(
+        tmp_path / "trends",
+        pair_name="SY24-25_EOY_vs_SY25-26_Q2",
+        summary={"current_school_year": "SY25-26"},
+        movements=[
+            {
+                "stream": "metrics",
+                "entity_key": "global",
+                "entity_label": "global",
+                "metric": "baseline_without_target",
+                "baseline": "10",
+                "current": "20",
+                "delta": "10",
+                "movement_type": "global_issue_delta",
+                "is_regression": True,
+            }
+        ],
+        regressions=[
+            {
+                "stream": "metrics",
+                "entity_key": "site-a",
+                "entity_label": "Alpha School",
+                "metric": "flagged_rows",
+                "baseline": "1",
+                "current": "3",
+                "delta": "2",
+                "movement_type": "school_flag_count_delta",
+                "is_regression": True,
+            },
+            {
+                "stream": "metrics",
+                "entity_key": "site-a",
+                "entity_label": "Alpha School",
+                "metric": "baseline_without_target",
+                "baseline": "1",
+                "current": "2",
+                "delta": "1",
+                "movement_type": "issue_code_delta",
+                "is_regression": True,
+            },
+            {
+                "stream": "metrics",
+                "entity_key": "site-b",
+                "entity_label": "Beta School",
+                "metric": "flagged_rows",
+                "baseline": "0",
+                "current": "1",
+                "delta": "1",
+                "movement_type": "school_flag_count_delta",
+                "is_regression": True,
+            },
+        ],
+    )
+    global_metrics = visualize.aggregate_global_metrics(pair_dir)
+    assert global_metrics["baseline_without_target"] == 20
+    assert global_metrics["both_baseline_and_target_blank"] is None
+
+    schools = visualize.aggregate_school_regressions(pair_dir, top_n=2)
+    assert schools[0]["school"] == "Alpha School"
+    assert schools[0]["regressions"] == 2
+    assert schools[0]["top_metric"] == "flagged_rows"
+
+
+def test_render_cross_year_html_writes_expected_labels(tmp_path: Path) -> None:
+    import visualize
+
+    output_dir = tmp_path / "trends"
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY24-25_EOY_vs_SY25-26_Q2",
+        summary={
+            "current_school_year": "SY25-26",
+            "baseline_school_year": "SY24-25",
+            "baseline_period": "EOY",
+            "current_period": "Q2",
+            "movement_count": 12,
+            "regression_count": 5,
+            "movements_by_type": {
+                "issue_code_delta": 8,
+                "school_flag_count_delta": 2,
+                "global_issue_delta": 1,
+                "grading_period_fill_delta": 1,
+                "site_appeared": 1,
+                "site_removed": 0,
+            },
+        },
+        movements=[
+            {
+                "stream": "metrics",
+                "entity_key": "global",
+                "entity_label": "global",
+                "metric": "baseline_without_target",
+                "baseline": "1",
+                "current": "9",
+                "delta": "8",
+                "movement_type": "global_issue_delta",
+                "is_regression": True,
+            }
+        ],
+        regressions=[
+            {
+                "stream": "metrics",
+                "entity_key": "site-a",
+                "entity_label": "Alpha School",
+                "metric": "flagged_rows",
+                "baseline": "1",
+                "current": "2",
+                "delta": "1",
+                "movement_type": "school_flag_count_delta",
+                "is_regression": True,
+            }
+        ],
+    )
+    aggregates = visualize.build_cross_year_aggregates(output_dir)
+    report_path = output_dir / "cross_year" / "index.html"
+    visualize.render_cross_year_html(aggregates, report_path)
+    html = report_path.read_text(encoding="utf-8")
+    assert "Cross-year trend report" in html
+    assert "Monday" not in html
+    assert "SY25-26" in html
+    assert "Alpha School" in html
+    assert "grading_period_fill_delta" in html
+
+
+def test_run_cross_year_compares_writes_html_report(tmp_path: Path) -> None:
+    import visualize
+
+    snapshots_dir = tmp_path / "snapshots"
+    output_dir = tmp_path / "trends"
+    inputs = tmp_path / "archives"
+    for school_year in ("SY24-25", "SY25-26"):
+        period = trends.FALLBACK_PERIOD if school_year == "SY24-25" else "Q1"
+        acc, met = _seed_period_inputs(inputs, school_year, period, acc_variant="worse")
+        trends.capture_snapshot(
+            school_year=school_year,
+            period=period,
+            snapshots_dir=snapshots_dir,
+            accreditation_workbook=acc,
+            metrics_workbook=met,
+        )
+    code = trends.run_cross_year_compares(
+        ["SY24-25", "SY25-26"],
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        regression_threshold=0.01,
+    )
+    assert code == 0
+    report_path = output_dir / "cross_year" / "index.html"
+    assert report_path.is_file()
+    aggregates = visualize.build_cross_year_aggregates(output_dir)
+    assert aggregates["pair_count"] == 1

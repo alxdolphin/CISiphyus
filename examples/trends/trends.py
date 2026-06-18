@@ -1228,6 +1228,13 @@ def run_cross_year_compares(
         print(f"compare cross-year: {prior_sy}/{FALLBACK_PERIOD} -> {curr_sy}/{curr_period}")
         print(f"  movements: {payload['movement_count']}")
         print(f"  output: {pair_dir}")
+    from visualize import build_cross_year_aggregates, load_cross_year_summaries, render_cross_year_html
+
+    if load_cross_year_summaries(output_dir):
+        aggregates = build_cross_year_aggregates(output_dir)
+        report_path = output_dir / "cross_year" / "index.html"
+        render_cross_year_html(aggregates, report_path)
+        print(f"cross-year report: {report_path}")
     return exit_code
 
 
