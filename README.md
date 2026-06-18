@@ -56,7 +56,15 @@ The CISDM session is persisted in `config/chrome-user-data/` (Playwright profile
 # Pull raw exports by report ID (according to `config/reports.yaml`)
 cisiphyus pull accreditation
 cisiphyus pull student_metrics_summary
+cisiphyus pull student_metrics_summary --school-year SY24-25
 ```
+
+Year-scoped direct exports (`student_metrics_summary`, `attendance_tracking`,
+`parent_guardian_consent`, `goal_tracking_student_goals`) read `school_year_programs`
+from `config/reports.yaml`. The `url_env` value in `export_urls.env` is a template for
+the current school year; historical years are selected with `--school-year`. Add a new
+row to `school_year_programs` when CISEPA creates the next enrollment program (verify
+the program ID from a fresh CISDM export URL before committing).
 
 ## EXAMPLES
 
@@ -83,7 +91,21 @@ cisiphyus audit metrics
 cisiphyus qpr --grading-period 2.0
 ```
 
+**Longitudinal trend tracker**
+> Discover available grading periods, capture accreditation + metrics audit snapshots, and compare consecutive quarters.
+
+```bash
+cisiphyus trend SY25-26
+cisiphyus trend SY25-26 SY24-25
+cisiphyus trend --all
+```
+
 ## CHANGELOG
+
+8 0.5.0
+  * Add `cisiphyus trend` for longitudinal trend tracking
+  * Enable URL refresh and URL parameterization to allow for multi-year report extraction (`cisiphyus pull <report_id> --school-year <school-year>`)
+  
 
 * 0.4.0
   * Group downstream audits under `cisiphyus audit accreditation` and `cisiphyus audit metrics`
