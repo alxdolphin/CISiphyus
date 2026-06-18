@@ -11,6 +11,7 @@ pin a local file for CI or reproducible reruns.
 |---|---|---|
 | Accreditation monitoring | `accreditation` | Site flag CSVs / summaries |
 | QPR provisioning | `student_metrics_summary` | Per-site `Q{n}_{Site}_QPR.xlsx` |
+| Longitudinal trend tracker | `accreditation` + `student_metrics_summary` | QoQ movement + regression CSVs / summaries |
 
 ## accreditation site monitoring (`accreditation/`)
 
@@ -61,6 +62,45 @@ cisiphyus qpr --grading-period 2.0 \
 
 Outputs: `artifacts/qpr/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 
+## longitudinal trend tracker (`trends/`)
+
+Discovers available reporting periods for each school year, captures snapshots, and
+compares consecutive quarters.
+
+```bash
+cisiphyus trend SY25-26
+cisiphyus trend SY25-26 SY24-25
+cisiphyus trend --all
+```
+
+### period discovery
+
+Periods come from `artifacts/qpr/{school-year}/Q{n}/` folders (same layout as QPR output),
+cached archives under `artifacts/archives/{school-year}/Q{n}/`, and existing snapshots.
+`--all` also includes every school year listed in `school_year_programs` inside
+`config/reports.yaml`. Years without QPR quarter folders are pulled from CISDM,
+archived under `artifacts/archives/{school-year}/EOY/`, and captured as
+`artifacts/snapshots/{school-year}/EOY/` snapshots (metrics-only for historical years).
+
+`--all` also runs cross-year compares (`artifacts/trends/cross_year/`) pairing each
+prior school year's EOY snapshot against the earliest period snapshot in the next year.
+
+Compare output warns when period snapshots share identical workbook hashes (CISDM exports
+are school-year-scoped, not quarter-scoped — run trend at each period close for meaningful QoQ).
+
+Per-year status is printed: `snapshotted`, `compared`, `skipped`, or `failed`.
+
+Run at the end of each grading period so each quarter gets its own CISDM pull. Older
+quarters without a cached pull are skipped until you have snapshot history for them.
+
+```bash
+cisiphyus trend SY25-26          # pull + capture latest missing period, compare pairs
+cisiphyus trend SY25-26 --force-fetch
+```
+
+Snapshots: `artifacts/snapshots/{school-year}/{period}/`  
+Compare outputs: `artifacts/trends/{school-year}/{Q1_vs_Q2}/`
+
 ## environment variables
 
 | Variable | Purpose |
@@ -72,6 +112,10 @@ Outputs: `artifacts/qpr/{school-year}/Q{n}/Q{n}_{Site}_QPR.xlsx` per site.
 | `QPR_STUDENT_METRICS_WORKBOOK` / `QPR_LOCAL_INPUTS_DIR` | Student metrics workbook destination |
 | `QPR_OUTPUT_DIR` | QPR provision output root (default `artifacts/qpr/`) |
 | `QPR_FETCH_STUDENT_METRICS` | `1` to force a refresh even when fresh |
+| `TREND_SNAPSHOTS_DIR` | Snapshot archive root (default `artifacts/snapshots/`) |
+| `TREND_INPUTS_DIR` | Cached CISDM pull copies (default `artifacts/archives/`) |
+| `TREND_OUTPUT_DIR` | Trend compare output root (default `artifacts/trends/`) |
+| `TREND_SCHOOL_YEAR` | Default school year when none passed to `cisiphyus trend` |
 
 ## tests
 

@@ -12,6 +12,16 @@ targets:
   metrics         Student metrics summary row-level audit
 """
 
+TREND_USAGE = """usage: cisiphyus trend <school-year> [school-year ...] [options]
+
+Discover available reporting periods, capture snapshots, and compare consecutive quarters.
+
+examples:
+  cisiphyus trend SY25-26
+  cisiphyus trend SY25-26 SY24-25
+  cisiphyus trend --all
+"""
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -73,6 +83,25 @@ def run_qpr_provision(argv: list[str]) -> int:
     )
 
 
+def run_trend(argv: list[str]) -> int:
+    if not argv or argv[0] in ("--help", "-h"):
+        print(TREND_USAGE, file=sys.stderr)
+        return 0 if argv and argv[0] in ("--help", "-h") else 1
+    example_dir = repo_root() / "examples" / "trends"
+    if not example_dir.is_dir():
+        print(
+            f"Error: Example directory not found at {example_dir}\n"
+            "This command is only available when running from a repository checkout "
+            "(e.g., pip install -e .).",
+            file=sys.stderr,
+        )
+        return 1
+    if str(example_dir) not in sys.path:
+        sys.path.insert(0, str(example_dir))
+    trends = __import__("trends")
+    return int(trends.main_trend(argv))
+
+
 def maybe_run_example_app(argv: list[str]) -> int | None:
     if len(argv) < 2:
         return None
@@ -84,5 +113,8 @@ def maybe_run_example_app(argv: list[str]) -> int | None:
 
     if command == "audit":
         return run_audit_app(rest)
+
+    if command == "trend":
+        return run_trend(rest)
 
     return None
