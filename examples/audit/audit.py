@@ -129,24 +129,37 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-def _cisiphyus_cmd(cisiphyus_root: Path) -> list[str]:
+def _cisiphyus_cmd(cisiphyus_root: Path, school_year: str | None = None) -> list[str]:
     run_py = cisiphyus_root / "run.py"
-    cmd: list[str] = [sys.executable, str(run_py), CISIPHYUS_REPORT_ID]
+    cmd: list[str] = [sys.executable, str(run_py), "pull", CISIPHYUS_REPORT_ID]
     headed = _flag_true(
         _env_first("AUDIT_CISPHYUS_HEADED", "CISPHYUS_HEADED")
     )
     if headed:
         cmd.append("--headed")
+    if school_year:
+        cmd.extend(["--school-year", school_year])
     return cmd
 
 
-def _cisiphyus_latest_raw(cisiphyus_root: Path) -> Path:
+def _cisiphyus_raw_path(cisiphyus_root: Path, school_year: str | None = None) -> Path:
+    if school_year:
+        src_dir = cisiphyus_root / "src"
+        if str(src_dir) not in sys.path:
+            sys.path.insert(0, str(src_dir))
+        import config
+
+        programs = config.load_school_year_programs(config.REPORTS_PATH)
+        default_sy = config.default_school_year(programs)
+        if default_sy and school_year != default_sy:
+            return config.archives_raw_path(school_year, CISIPHYUS_REPORT_ID)
     return cisiphyus_root / "artifacts" / "latest" / CISIPHYUS_REPORT_ID / "raw.xlsx"
 
 
 def _run_cisiphyus_export(
     *,
     cisiphyus_root: Path,
+    school_year: str | None = None,
     run: Callable[..., Any],
 ) -> Path:
     run_py = cisiphyus_root / "run.py"
@@ -154,7 +167,7 @@ def _run_cisiphyus_export(
         raise FileNotFoundError(f"cisiphyus run.py not found at {run_py}")
 
     completed = run(
-        _cisiphyus_cmd(cisiphyus_root),
+        _cisiphyus_cmd(cisiphyus_root, school_year=school_year),
         cwd=str(cisiphyus_root),
         check=False,
         env=os.environ.copy(),
@@ -165,7 +178,7 @@ def _run_cisiphyus_export(
             f"{getattr(completed, 'returncode', 'unknown')}"
         )
 
-    raw = _cisiphyus_latest_raw(cisiphyus_root)
+    raw = _cisiphyus_raw_path(cisiphyus_root, school_year=school_year)
     if not raw.is_file():
         raise FileNotFoundError(f"expected cisiphyus output missing: {raw}")
     return raw
@@ -176,6 +189,7 @@ def fetch_student_metrics_workbook(
     destination: Path | None = None,
     force_fetch: bool = False,
     require_fresh: bool = False,
+    school_year: str | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> FetchResult:
     """Fetch student metrics summary from CISDM when missing, stale, or forced."""
@@ -202,7 +216,11 @@ def fetch_student_metrics_workbook(
     ).expanduser().resolve()
 
     try:
-        raw = _run_cisiphyus_export(cisiphyus_root=cisiphyus_root, run=run)
+        raw = _run_cisiphyus_export(
+            cisiphyus_root=cisiphyus_root,
+            school_year=school_year,
+            run=run,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(raw, target)
 
@@ -786,6 +804,19 @@ def baseline_target_status(record: RowRecord) -> str:
 
 def grading_period_count(record: RowRecord) -> int:
     return sum(1 for header in GRADING_PERIOD_HEADERS if not is_blank(_text(record, header)))
+
+
+def grading_period_fill_stats(
+    workbook_path: Path,
+    sheet_name: str = DEFAULT_SHEET,
+) -> dict[str, int]:
+    rows = load_rows(workbook_path, sheet_name)
+    stats = {header: 0 for header in GRADING_PERIOD_HEADERS}
+    for record in rows:
+        for header in GRADING_PERIOD_HEADERS:
+            if not is_blank(_text(record, header)):
+                stats[header] += 1
+    return stats
 
 
 def student_metric_context(record: RowRecord) -> tuple[str, str]:
