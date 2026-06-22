@@ -422,6 +422,50 @@ def test_cross_year_compare(tmp_path: Path) -> None:
     )
     assert payload["compare_mode"] == "cross_year"
     assert payload["movement_count"] >= 0
+    assert (snapshots_dir / "SY24-25" / trends.FALLBACK_PERIOD / "metrics" / "progress_rollup.json").is_file()
+    assert payload.get("goal_progress") is not None
+
+
+def test_compare_goal_progress_row_level(tmp_path: Path) -> None:
+    base = {
+        "global": {"on_track": 2, "off_track": 1, "no_progress_data": 0, "indeterminate": 0},
+        "schools": {},
+        "eligible_rows": 3,
+        "progress_index": {
+            "a|School|Goal|Metric": "off_track",
+            "b|School|Goal|Metric": "on_track",
+        },
+    }
+    curr = {
+        "global": {"on_track": 3, "off_track": 0, "no_progress_data": 0, "indeterminate": 0},
+        "schools": {},
+        "eligible_rows": 3,
+        "progress_index": {
+            "a|School|Goal|Metric": "on_track",
+            "b|School|Goal|Metric": "on_track",
+        },
+    }
+    result = trends._compare_goal_progress(base, curr)
+    assert result["row_level"]["improved"] == 1
+    assert result["row_level"]["worsened"] == 0
+    assert result["current"]["on_track_pct"] == 100.0
+
+
+def test_backfill_progress_rollups_from_snapshot_workbook(tmp_path: Path) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    inputs = tmp_path / "archives"
+    acc, met = _seed_period_inputs(inputs, "TEST", trends.FALLBACK_PERIOD)
+    trends.capture_snapshot(
+        school_year="TEST",
+        period=trends.FALLBACK_PERIOD,
+        snapshots_dir=snapshots_dir,
+        accreditation_workbook=acc,
+        metrics_workbook=met,
+    )
+    progress_path = snapshots_dir / "TEST" / trends.FALLBACK_PERIOD / "metrics" / "progress_rollup.json"
+    progress_path.unlink()
+    assert trends.backfill_progress_rollups(snapshots_dir) == 1
+    assert progress_path.is_file()
 
 
 def test_compare_summary_omits_related_work_section(tmp_path: Path) -> None:
@@ -445,6 +489,7 @@ def test_compare_summary_omits_related_work_section(tmp_path: Path) -> None:
     )
     paths = trends.export_trend_results(payload, tmp_path / "out")
     md = Path(paths["trend_summary_md"]).read_text(encoding="utf-8")
+    assert "Student Metrics Summary data quality" in md
     assert "Related work" not in md
     assert "Monday" not in md
     assert "monday.com" not in md
@@ -467,6 +512,36 @@ def _write_cross_year_pair(
     trends._write_movements_csv(pair_dir / "trend_movements.csv", movements)
     trends._write_movements_csv(pair_dir / "regression_flags.csv", regressions)
     return pair_dir
+
+
+def test_build_cross_year_aggregates_includes_all_eoy_snapshots(tmp_path: Path) -> None:
+    import visualize
+
+    snapshots_dir = tmp_path / "snapshots"
+    output_dir = tmp_path / "trends"
+    inputs = tmp_path / "archives"
+    for school_year in ("SY23-24", "SY24-25"):
+        acc, met = _seed_period_inputs(inputs, school_year, trends.FALLBACK_PERIOD)
+        trends.capture_snapshot(
+            school_year=school_year,
+            period=trends.FALLBACK_PERIOD,
+            snapshots_dir=snapshots_dir,
+            accreditation_workbook=acc,
+            metrics_workbook=met,
+        )
+    trends.run_cross_year_compares(
+        ["SY23-24", "SY24-25"],
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        regression_threshold=0.01,
+    )
+    aggregates = visualize.build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+    )
+    assert aggregates["eoy_categories"] == ["SY23-24", "SY24-25"]
+    assert aggregates["transition_categories"] == ["SY24-25"]
+    assert len(aggregates["goal_on_track_series"]) == 2
 
 
 def test_load_cross_year_summaries_sort_order(tmp_path: Path) -> None:
@@ -619,15 +694,79 @@ def test_render_cross_year_html_writes_expected_labels(tmp_path: Path) -> None:
             }
         ],
     )
-    aggregates = visualize.build_cross_year_aggregates(output_dir)
     report_path = output_dir / "cross_year" / "index.html"
+    pair_dir = output_dir / "cross_year" / "SY24-25_EOY_vs_SY25-26_Q2"
+    (pair_dir / "goal_progress_summary.json").write_text(
+        json.dumps(
+            {
+                "baseline": {"eligible_rows": 100, "on_track_pct": 40.0, "global": {}},
+                "current": {"eligible_rows": 120, "on_track_pct": 45.0, "global": {}},
+                "row_level": {"improved": 3, "worsened": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    aggregates = visualize.build_cross_year_aggregates(output_dir)
     visualize.render_cross_year_html(aggregates, report_path)
     html = report_path.read_text(encoding="utf-8")
     assert "Cross-year trend report" in html
     assert "Monday" not in html
     assert "SY25-26" in html
     assert "Alpha School" in html
+    assert "Changed issue counts" in html
+    assert "Issue counts increased" in html
     assert "grading_period_fill_delta" in html
+    assert "Goal–Metric rows with Baseline and Target" in html
+    assert "120 Goal–Metric rows" in html
+    assert 'class="data-label"' in html
+    assert ">12</text>" in html
+    assert ">5</text>" in html
+
+
+def test_svg_line_chart_value_labels() -> None:
+    import visualize
+
+    svg = visualize._svg_line_chart(
+        width=400,
+        height=200,
+        categories=["A", "B"],
+        series=[{"name": "Test", "data": [10, 20]}],
+        y_label="Test chart",
+        show_value_labels="all",
+    )
+    assert 'class="data-label"' in svg
+    assert ">10</text>" in svg
+    assert ">20</text>" in svg
+
+    svg_latest = visualize._svg_line_chart(
+        width=400,
+        height=200,
+        categories=["A", "B", "C"],
+        series=[{"name": "Test", "data": [10, 20, 30]}],
+        y_label="Test chart",
+        show_value_labels="latest",
+    )
+    assert ">30</text>" in svg_latest
+    assert ">10</text>" not in svg_latest
+    assert ">20</text>" not in svg_latest
+
+
+def test_svg_stacked_bar_chart_show_totals() -> None:
+    import visualize
+
+    svg = visualize._svg_stacked_bar_chart(
+        width=400,
+        height=200,
+        categories=["SY24-25"],
+        series=[
+            {"name": "a", "data": [8]},
+            {"name": "b", "data": [4]},
+        ],
+        y_label="Stacked test",
+        show_totals=True,
+    )
+    assert 'class="data-label"' in svg
+    assert ">12</text>" in svg
 
 
 def test_run_cross_year_compares_writes_html_report(tmp_path: Path) -> None:
@@ -637,11 +776,15 @@ def test_run_cross_year_compares_writes_html_report(tmp_path: Path) -> None:
     output_dir = tmp_path / "trends"
     inputs = tmp_path / "archives"
     for school_year in ("SY24-25", "SY25-26"):
-        period = trends.FALLBACK_PERIOD if school_year == "SY24-25" else "Q1"
-        acc, met = _seed_period_inputs(inputs, school_year, period, acc_variant="worse")
+        acc, met = _seed_period_inputs(
+            inputs,
+            school_year,
+            trends.FALLBACK_PERIOD,
+            acc_variant="worse",
+        )
         trends.capture_snapshot(
             school_year=school_year,
-            period=period,
+            period=trends.FALLBACK_PERIOD,
             snapshots_dir=snapshots_dir,
             accreditation_workbook=acc,
             metrics_workbook=met,
@@ -655,5 +798,64 @@ def test_run_cross_year_compares_writes_html_report(tmp_path: Path) -> None:
     assert code == 0
     report_path = output_dir / "cross_year" / "index.html"
     assert report_path.is_file()
-    aggregates = visualize.build_cross_year_aggregates(output_dir)
+    aggregates = visualize.build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+    )
     assert aggregates["pair_count"] == 1
+    assert aggregates["eoy_snapshot_count"] == 2
+
+
+def test_run_cross_year_compares_skips_without_eoy_snapshot(tmp_path: Path) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    output_dir = tmp_path / "trends"
+    inputs = tmp_path / "archives"
+    acc, met = _seed_period_inputs(inputs, "SY24-25", trends.FALLBACK_PERIOD)
+    trends.capture_snapshot(
+        school_year="SY24-25",
+        period=trends.FALLBACK_PERIOD,
+        snapshots_dir=snapshots_dir,
+        accreditation_workbook=acc,
+        metrics_workbook=met,
+    )
+    acc2, met2 = _seed_period_inputs(inputs, "SY25-26", "Q1", acc_variant="worse")
+    trends.capture_snapshot(
+        school_year="SY25-26",
+        period="Q1",
+        snapshots_dir=snapshots_dir,
+        accreditation_workbook=acc2,
+        metrics_workbook=met2,
+    )
+    code = trends.run_cross_year_compares(
+        ["SY24-25", "SY25-26"],
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        regression_threshold=0.01,
+    )
+    assert code == 0
+    import visualize
+
+    assert visualize.load_cross_year_summaries(output_dir) == []
+
+
+def test_discover_eoy_snapshot_years(tmp_path: Path) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    inputs = tmp_path / "archives"
+    for school_year in ("SY23-24", "SY24-25"):
+        acc, met = _seed_period_inputs(inputs, school_year, trends.FALLBACK_PERIOD)
+        trends.capture_snapshot(
+            school_year=school_year,
+            period=trends.FALLBACK_PERIOD,
+            snapshots_dir=snapshots_dir,
+            accreditation_workbook=acc,
+            metrics_workbook=met,
+        )
+    acc, met = _seed_period_inputs(inputs, "SY25-26", "Q1")
+    trends.capture_snapshot(
+        school_year="SY25-26",
+        period="Q1",
+        snapshots_dir=snapshots_dir,
+        accreditation_workbook=acc,
+        metrics_workbook=met,
+    )
+    assert trends.discover_eoy_snapshot_years(snapshots_dir) == ["SY23-24", "SY24-25"]

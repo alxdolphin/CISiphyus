@@ -82,8 +82,16 @@ cached archives under `artifacts/archives/{school-year}/Q{n}/`, and existing sna
 archived under `artifacts/archives/{school-year}/EOY/`, and captured as
 `artifacts/snapshots/{school-year}/EOY/` snapshots (metrics-only for historical years).
 
-`--all` also runs cross-year compares (`artifacts/trends/cross_year/`) pairing each
-prior school year's EOY snapshot against the earliest period snapshot in the next year.
+`--all` also runs cross-year compares (`artifacts/trends/cross_year/`) between
+consecutive EOY snapshots (prior school year EOY vs next school year EOY). Years
+without an EOY snapshot are skipped until one is captured.
+
+The cross-year HTML report has two sections:
+
+- **Student Metrics Summary data quality** — changed issue counts and issue counts increased (issue-flag / flagged-row deltas).
+- **Goal progress** — Goal–Metric rows with Baseline and Target where the latest filled Grading Period value is compared to Target; includes % meets Target and School Year–over–School Year Goal–Metric row improved/worsened counts.
+
+Snapshots store `metrics/progress_rollup.json` for goal progress. Re-run `backfill_progress_rollups` or `cisiphyus trend --all` to populate historical snapshots.
 
 Compare output warns when period snapshots share identical workbook hashes (CISDM exports
 are school-year-scoped, not quarter-scoped — run trend at each period close for meaningful QoQ).

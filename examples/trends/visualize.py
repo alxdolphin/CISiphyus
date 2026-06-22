@@ -6,7 +6,7 @@ import csv
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 GLOBAL_METRICS = (
     "baseline_without_target",
@@ -22,6 +22,8 @@ MOVEMENT_TYPE_ORDER = (
     "site_appeared",
     "site_removed",
 )
+
+EOY_PERIOD = "EOY"
 
 
 def _school_year_sort_key(label: str) -> tuple[int, int]:
@@ -95,16 +97,75 @@ def aggregate_school_regressions(pair_dir: Path, *, top_n: int = 10) -> list[dic
     return rows
 
 
-def build_cross_year_aggregates(output_dir: Path) -> dict[str, Any]:
+def load_goal_progress_summary(pair_dir: Path) -> dict[str, Any] | None:
+    summary_path = pair_dir / "goal_progress_summary.json"
+    if not summary_path.is_file():
+        return None
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def aggregate_school_goal_changes(pair_dir: Path, *, top_n: int = 10) -> list[dict[str, Any]]:
+    summary = load_goal_progress_summary(pair_dir)
+    if not summary:
+        return []
+    changes = summary.get("school_changes") or []
+    rows: list[dict[str, Any]] = []
+    for item in sorted(changes, key=lambda row: row.get("delta_pct", 0))[:top_n]:
+        rows.append(
+            {
+                "school": item.get("school", ""),
+                "delta_pct": item.get("delta_pct", 0),
+                "baseline_on_track_pct": item.get("baseline_on_track_pct"),
+                "current_on_track_pct": item.get("current_on_track_pct"),
+            }
+        )
+    return rows
+
+
+def discover_eoy_snapshot_years(snapshots_dir: Path) -> list[str]:
+    if not snapshots_dir.is_dir():
+        return []
+    years: list[str] = []
+    for entry in snapshots_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / EOY_PERIOD).is_dir():
+            years.append(entry.name)
+    return sorted(years, key=_school_year_sort_key)
+
+
+def load_eoy_global_issue_counts(snapshots_dir: Path, school_year: str) -> dict[str, int | None]:
+    path = snapshots_dir / school_year / EOY_PERIOD / "metrics" / "audit_summary.json"
+    if not path.is_file():
+        return {metric: None for metric in GLOBAL_METRICS}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    counts = payload.get("issue_code_counts") or {}
+    values: dict[str, int | None] = {}
+    for metric in GLOBAL_METRICS:
+        raw = counts.get(metric)
+        values[metric] = int(raw) if raw is not None else None
+    return values
+
+
+def load_eoy_progress_rollup(snapshots_dir: Path, school_year: str) -> dict[str, Any] | None:
+    path = snapshots_dir / school_year / EOY_PERIOD / "metrics" / "progress_rollup.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def build_cross_year_aggregates(
+    output_dir: Path,
+    *,
+    snapshots_dir: Path | None = None,
+) -> dict[str, Any]:
     summaries = load_cross_year_summaries(output_dir)
     transitions: list[dict[str, Any]] = []
-    global_series: dict[str, list[int | None]] = {metric: [] for metric in GLOBAL_METRICS}
-    categories: list[str] = []
+    transition_categories: list[str] = []
 
     for summary in summaries:
-        pair_dir = Path(summary["_pair_dir"])
         current_sy = str(summary.get("current_school_year", ""))
-        categories.append(current_sy)
+        transition_categories.append(current_sy)
         by_type = summary.get("movements_by_type") or {}
         transitions.append(
             {
@@ -122,9 +183,6 @@ def build_cross_year_aggregates(output_dir: Path) -> dict[str, Any]:
                 },
             }
         )
-        global_values = aggregate_global_metrics(pair_dir)
-        for metric in GLOBAL_METRICS:
-            global_series[metric].append(global_values.get(metric))
 
     latest = transitions[-1] if transitions else None
     latest_pair_dir = Path(summaries[-1]["_pair_dir"]) if summaries else None
@@ -135,6 +193,83 @@ def build_cross_year_aggregates(output_dir: Path) -> dict[str, Any]:
     regression_counts = [int(row["regression_count"]) for row in transitions]
     mean_regressions = (
         sum(regression_counts) / len(regression_counts) if regression_counts else 0
+    )
+
+    transition_years: set[str] = set()
+    for summary in summaries:
+        baseline_sy = summary.get("baseline_school_year")
+        current_sy = summary.get("current_school_year")
+        if baseline_sy:
+            transition_years.add(str(baseline_sy))
+        if current_sy:
+            transition_years.add(str(current_sy))
+
+    eoy_categories: list[str] = []
+    global_series: dict[str, list[int | None]] = {metric: [] for metric in GLOBAL_METRICS}
+    goal_on_track_series: list[int | None] = []
+    goal_off_track_series: list[int | None] = []
+    goal_on_track_pct_series: list[float | None] = []
+    goal_progress_transitions: list[dict[str, Any]] = []
+
+    if snapshots_dir is not None:
+        eoy_categories = discover_eoy_snapshot_years(snapshots_dir)
+        if transition_years:
+            eoy_categories = [year for year in eoy_categories if year in transition_years]
+        for school_year in eoy_categories:
+            issue_counts = load_eoy_global_issue_counts(snapshots_dir, school_year)
+            for metric in GLOBAL_METRICS:
+                global_series[metric].append(issue_counts.get(metric))
+            rollup = load_eoy_progress_rollup(snapshots_dir, school_year)
+            global_counts = (rollup or {}).get("global") or {}
+            goal_progress_transitions.append(
+                {
+                    "label": school_year,
+                    "on_track": int(global_counts.get("on_track", 0)),
+                    "off_track": int(global_counts.get("off_track", 0)),
+                    "on_track_pct": _on_track_pct_from_rollup(rollup),
+                    "eligible_rows": int((rollup or {}).get("eligible_rows", 0)),
+                }
+            )
+            goal_on_track_series.append(
+                int(global_counts.get("on_track", 0)) if rollup else None
+            )
+            goal_off_track_series.append(
+                int(global_counts.get("off_track", 0)) if rollup else None
+            )
+            goal_on_track_pct_series.append(_on_track_pct_from_rollup(rollup))
+    else:
+        eoy_categories = list(transition_categories)
+        for summary in summaries:
+            pair_dir = Path(summary["_pair_dir"])
+            global_values = aggregate_global_metrics(pair_dir)
+            for metric in GLOBAL_METRICS:
+                global_series[metric].append(global_values.get(metric))
+            goal_summary = load_goal_progress_summary(pair_dir)
+            current = (goal_summary or {}).get("current") or {}
+            global_counts = current.get("global") or {}
+            goal_progress_transitions.append(
+                {
+                    "label": str(summary.get("current_school_year", "")),
+                    "on_track": int(global_counts.get("on_track", 0)),
+                    "off_track": int(global_counts.get("off_track", 0)),
+                    "on_track_pct": current.get("on_track_pct"),
+                    "eligible_rows": int(current.get("eligible_rows", 0)),
+                    "row_level": (goal_summary or {}).get("row_level") or {},
+                }
+            )
+            goal_on_track_series.append(
+                int(global_counts.get("on_track", 0)) if goal_summary else None
+            )
+            goal_off_track_series.append(
+                int(global_counts.get("off_track", 0)) if goal_summary else None
+            )
+            goal_on_track_pct_series.append(current.get("on_track_pct") if goal_summary else None)
+
+    latest_goal_summary = (
+        load_goal_progress_summary(latest_pair_dir) if latest_pair_dir else None
+    )
+    goal_school_leaderboard = (
+        aggregate_school_goal_changes(latest_pair_dir) if latest_pair_dir else []
     )
 
     latest_headline: dict[str, Any] | None = None
@@ -154,15 +289,55 @@ def build_cross_year_aggregates(output_dir: Path) -> dict[str, Any]:
             ),
         }
 
+    latest_goal_headline: dict[str, Any] | None = None
+    if latest_goal_summary:
+        current = latest_goal_summary.get("current") or {}
+        baseline = latest_goal_summary.get("baseline") or {}
+        row_level = latest_goal_summary.get("row_level") or {}
+        base_pct = baseline.get("on_track_pct")
+        curr_pct = current.get("on_track_pct")
+        yoy_delta = None
+        if isinstance(base_pct, (int, float)) and isinstance(curr_pct, (int, float)):
+            yoy_delta = round(curr_pct - base_pct, 1)
+        latest_goal_headline = {
+            "on_track_pct": curr_pct,
+            "yoy_on_track_delta_pct": yoy_delta,
+            "eligible_rows": current.get("eligible_rows", 0),
+            "rows_improved": row_level.get("improved", 0),
+            "rows_worsened": row_level.get("worsened", 0),
+            "pair_label": (latest_headline or {}).get("pair_label", ""),
+        }
+
     return {
-        "categories": categories,
+        "categories": transition_categories,
+        "transition_categories": transition_categories,
+        "eoy_categories": eoy_categories,
         "transitions": transitions,
         "global_series": global_series,
         "school_leaderboard": school_leaderboard,
         "mean_regressions": round(mean_regressions, 1),
         "latest_headline": latest_headline,
+        "goal_progress_transitions": goal_progress_transitions,
+        "goal_on_track_series": goal_on_track_series,
+        "goal_off_track_series": goal_off_track_series,
+        "goal_on_track_pct_series": goal_on_track_pct_series,
+        "goal_school_leaderboard": goal_school_leaderboard,
+        "latest_goal_headline": latest_goal_headline,
         "pair_count": len(transitions),
+        "eoy_snapshot_count": len(eoy_categories),
     }
+
+
+def _on_track_pct_from_rollup(rollup: dict[str, Any] | None) -> float | None:
+    if not rollup:
+        return None
+    global_counts = rollup.get("global") or {}
+    on_track = int(global_counts.get("on_track", 0))
+    off_track = int(global_counts.get("off_track", 0))
+    tracked = on_track + off_track
+    if tracked == 0:
+        return None
+    return round(100 * on_track / tracked, 1)
 
 
 def _svg_line_chart(
@@ -172,6 +347,8 @@ def _svg_line_chart(
     categories: list[str],
     series: list[dict[str, Any]],
     y_label: str,
+    show_value_labels: Literal["none", "all", "latest"] = "none",
+    value_label_offset: int = 8,
 ) -> str:
     if not categories or not series:
         return ""
@@ -232,13 +409,27 @@ def _svg_line_chart(
                 f'<polyline fill="none" stroke="{color}" stroke-width="2" '
                 f'points="{" ".join(points)}"/>'
             )
+        labeled_indices: set[int] = set()
+        if show_value_labels == "all":
+            labeled_indices = {
+                index for index, value in enumerate(item["data"]) if value is not None
+            }
+        elif show_value_labels == "latest":
+            for index in range(len(item["data"]) - 1, -1, -1):
+                if item["data"][index] is not None:
+                    labeled_indices.add(index)
+                    break
         for index, value in enumerate(item["data"]):
             if value is None:
                 continue
-            parts.append(
-                f'<circle cx="{x_pos(index):.1f}" cy="{y_pos(float(value)):.1f}" r="3" '
-                f'fill="{color}"/>'
-            )
+            cx = x_pos(index)
+            cy = y_pos(float(value))
+            parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3" fill="{color}"/>')
+            if index in labeled_indices:
+                parts.append(
+                    f'<text x="{cx:.1f}" y="{cy - value_label_offset:.1f}" '
+                    f'class="data-label" text-anchor="middle">{int(value)}</text>'
+                )
         parts.append(
             f'<text x="{width - margin["right"]}" y="{20 + series_index * 14}" '
             f'class="legend" fill="{color}">■ {item["name"]}</text>'
@@ -254,6 +445,7 @@ def _svg_stacked_bar_chart(
     categories: list[str],
     series: list[dict[str, Any]],
     y_label: str,
+    show_totals: bool = False,
 ) -> str:
     if not categories or not series:
         return ""
@@ -293,6 +485,11 @@ def _svg_stacked_bar_chart(
                 f'height="{height_px:.1f}" fill="{color}"/>'
             )
             stack_base += value
+        if show_totals and totals[index] > 0:
+            parts.append(
+                f'<text x="{x_center:.1f}" y="{y_pos(totals[index]) - 4:.1f}" '
+                f'class="data-label" text-anchor="middle">{totals[index]}</text>'
+            )
         parts.append(
             f'<text x="{x_center:.1f}" y="{height - 12}" class="axis-label" '
             f'text-anchor="middle" transform="rotate(-35 {x_center:.1f} {height - 12})">{label}</text>'
@@ -313,6 +510,7 @@ def _svg_horizontal_bar_chart(
     height: int,
     rows: list[dict[str, Any]],
     y_label: str,
+    value_key: str = "regressions",
 ) -> str:
     if not rows:
         return ""
@@ -320,7 +518,8 @@ def _svg_horizontal_bar_chart(
     plot_w = width - margin["left"] - margin["right"]
     row_h = min(28, (height - margin["top"] - margin["bottom"]) / max(len(rows), 1))
     chart_h = margin["top"] + margin["bottom"] + row_h * len(rows)
-    x_max = max(int(row["regressions"]) for row in rows) * 1.1 or 1
+    values = [abs(float(row[value_key])) for row in rows]
+    x_max = max(values) * 1.1 or 1
 
     parts = [
         f'<svg viewBox="0 0 {width} {chart_h}" width="100%" role="img" '
@@ -329,7 +528,7 @@ def _svg_horizontal_bar_chart(
     ]
     for index, row in enumerate(rows):
         y = margin["top"] + index * row_h
-        value = int(row["regressions"])
+        value = abs(float(row[value_key]))
         bar_w = (value / x_max) * plot_w
         parts.append(
             f'<text x="{margin["left"] - 8}" y="{y + row_h * 0.65:.1f}" class="axis-label" '
@@ -341,27 +540,34 @@ def _svg_horizontal_bar_chart(
         )
         parts.append(
             f'<text x="{margin["left"] + bar_w + 6:.1f}" y="{y + row_h * 0.65:.1f}" '
-            f'class="axis-label">{value}</text>'
+            f'class="axis-label">{row[value_key]}</text>'
         )
     parts.append("</svg>")
     return "\n".join(parts)
 
 
 def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
-    categories = aggregates.get("categories") or []
+    transition_categories = (
+        aggregates.get("transition_categories") or aggregates.get("categories") or []
+    )
+    eoy_categories = aggregates.get("eoy_categories") or transition_categories
     transitions = aggregates.get("transitions") or []
     global_series = aggregates.get("global_series") or {}
     school_leaderboard = aggregates.get("school_leaderboard") or []
     headline = aggregates.get("latest_headline") or {}
+    goal_headline = aggregates.get("latest_goal_headline") or {}
+    goal_school_leaderboard = aggregates.get("goal_school_leaderboard") or []
     mean_regressions = aggregates.get("mean_regressions", 0)
+    goal_on_track_series = aggregates.get("goal_on_track_series") or []
+    goal_off_track_series = aggregates.get("goal_off_track_series") or []
 
     volume_series = [
         {
-            "name": "Movements",
+            "name": "Changed issue counts",
             "data": [int(row["movement_count"]) for row in transitions],
         },
         {
-            "name": "Regressions",
+            "name": "Issue counts increased",
             "data": [int(row["regression_count"]) for row in transitions],
         },
     ]
@@ -375,33 +581,55 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     global_chart_series = [
         {"name": metric, "data": global_series.get(metric, [])} for metric in GLOBAL_METRICS
     ]
+    goal_chart_series = [
+        {"name": "Meets Target", "data": goal_on_track_series},
+        {"name": "Does not meet Target", "data": goal_off_track_series},
+    ]
 
     volume_svg = _svg_line_chart(
         width=900,
         height=320,
-        categories=categories,
+        categories=transition_categories,
         series=volume_series,
-        y_label="Movement and regression counts by school year",
+        y_label="Changed issue counts and issue increases by school year",
+        show_value_labels="all",
     )
     composition_svg = _svg_stacked_bar_chart(
         width=900,
         height=340,
-        categories=categories,
+        categories=transition_categories,
         series=composition_series,
-        y_label="Movements by type (stacked)",
+        y_label="Changed issue counts by type (stacked)",
+        show_totals=True,
     )
     global_svg = _svg_line_chart(
         width=900,
         height=320,
-        categories=categories,
+        categories=eoy_categories,
         series=global_chart_series,
-        y_label="Global issue row counts (current period)",
+        y_label="Global issue row counts at each EOY snapshot",
+        show_value_labels="latest",
     )
     school_svg = _svg_horizontal_bar_chart(
         width=900,
         height=360,
         rows=school_leaderboard,
-        y_label="Top schools by regression count (latest pair)",
+        y_label="Schools with most issue increases (latest comparison)",
+    )
+    goal_svg = _svg_horizontal_bar_chart(
+        width=900,
+        height=360,
+        rows=goal_school_leaderboard,
+        y_label="Largest % meets Target drops by School (latest comparison)",
+        value_key="delta_pct",
+    )
+    goal_timeline_svg = _svg_line_chart(
+        width=900,
+        height=320,
+        categories=eoy_categories,
+        series=goal_chart_series,
+        y_label="Goal–Metric row counts at each School Year EOY snapshot",
+        show_value_labels="all",
     )
 
     school_table_rows = "".join(
@@ -409,18 +637,83 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
         f"<td><code>{row['top_metric']}</code></td></tr>"
         for row in school_leaderboard
     )
+    goal_school_table_rows = "".join(
+        f"<tr><td>{row['school']}</td><td>{row['delta_pct']}</td>"
+        f"<td>{row.get('baseline_on_track_pct', '')}% → {row.get('current_on_track_pct', '')}%</td></tr>"
+        for row in goal_school_leaderboard
+    )
 
-    headline_html = ""
+    audit_headline_html = ""
     if headline:
-        headline_html = f"""
+        audit_headline_html = f"""
         <section class="stats">
-          <div class="stat"><div class="stat-value">{headline.get("movements", 0)}</div><div class="stat-label">Movements</div></div>
-          <div class="stat"><div class="stat-value danger">{headline.get("regressions", 0)}</div><div class="stat-label">Regressions</div></div>
-          <div class="stat"><div class="stat-value">{headline.get("regression_rate_pct", 0)}%</div><div class="stat-label">Regression rate</div></div>
-          <div class="stat"><div class="stat-value">{headline.get("site_churn", 0)}</div><div class="stat-label">Site churn</div></div>
+          <div class="stat"><div class="stat-value">{headline.get("movements", 0)}</div><div class="stat-label">Changed issue counts</div></div>
+          <div class="stat"><div class="stat-value danger">{headline.get("regressions", 0)}</div><div class="stat-label">Issue counts increased</div></div>
+          <div class="stat"><div class="stat-value">{headline.get("regression_rate_pct", 0)}%</div><div class="stat-label">Issue increase rate</div></div>
+          <div class="stat"><div class="stat-value">{headline.get("site_churn", 0)}</div><div class="stat-label">Schools added or removed</div></div>
         </section>
-        <p class="caption">Latest pair: {headline.get("pair_label", "")}</p>
+        <p class="caption">Latest School Year comparison: {headline.get("pair_label", "")}</p>
         """
+
+    goal_headline_html = ""
+    if goal_headline:
+        yoy = goal_headline.get("yoy_on_track_delta_pct")
+        yoy_text = f"{yoy:+.1f}pp" if isinstance(yoy, (int, float)) else "n/a"
+        goals_tracked = int(goal_headline.get("eligible_rows", 0) or 0)
+        goal_headline_html = f"""
+        <section class="stats">
+          <div class="stat"><div class="stat-value">{goal_headline.get("on_track_pct", "n/a")}%</div><div class="stat-label">% meets Target (latest EOY)</div></div>
+          <div class="stat"><div class="stat-value">{yoy_text}</div><div class="stat-label">YoY % meets Target change</div></div>
+          <div class="stat"><div class="stat-value">{goal_headline.get("rows_improved", 0)}</div><div class="stat-label">Goal–Metric rows improved</div></div>
+          <div class="stat"><div class="stat-value danger">{goal_headline.get("rows_worsened", 0)}</div><div class="stat-label">Goal–Metric rows worsened</div></div>
+        </section>
+        <p class="caption">School Year comparison: {goal_headline.get("pair_label", "")} · {goals_tracked:,} Goal–Metric rows with Baseline and Target · improved/worsened = same Student ID + School + Goal + Metric, School Year over School Year</p>
+        """
+
+    caveats: list[str] = [
+        "<strong>Student Metrics Summary data quality:</strong> each unit is one changed "
+        "issue count or flagged-row metric between snapshots — not a student or School count.",
+        "<strong>Goal progress:</strong> Goal–Metric rows with Baseline and Target set; "
+        "% meets Target compares the latest filled Grading Period value to the Target column.",
+    ]
+    latest_transition = transitions[-1] if transitions else None
+    if (
+        latest_transition
+        and latest_transition.get("baseline_period") != latest_transition.get("current_period")
+    ):
+        caveats.append(
+            "Latest pair compares "
+            f"{latest_transition['baseline_school_year']} {latest_transition['baseline_period']} "
+            f"to {latest_transition['current_school_year']} {latest_transition['current_period']} "
+            "— periods are not aligned."
+        )
+        caveats.append(
+            "<code>grading_period_fill_delta</code> in the latest pair reflects "
+            "snapshot timing, not data quality decline."
+        )
+    elif transitions:
+        caveats.append("All School Year comparisons use aligned EOY-to-EOY snapshots.")
+    caveats.append(
+        "Cross-year goal progress does not track students who changed schools or exited caseload."
+    )
+    caveats_html = "".join(f"      <li>{item}</li>\n" for item in caveats)
+
+    goal_section_html = ""
+    if goal_headline or any(value is not None for value in goal_on_track_series):
+        goal_section_html = f"""
+  <h2>Goal progress</h2>
+  <p class="caption">From Student Metrics Summary · % meets Target and Goal–Metric row counts (Baseline and Target set)</p>
+  {goal_headline_html}
+  <h3>Meets Target vs does not meet Target timeline</h3>
+  <div class="chart">{goal_timeline_svg}</div>
+  <h3>Schools with largest % meets Target drop</h3>
+  <p class="caption">Latest School Year comparison only · negative delta = fewer Goal–Metric rows meet Target vs prior EOY</p>
+  <div class="chart">{goal_svg}</div>
+  <table>
+    <thead><tr><th>School</th><th>% meets Target change</th><th>Baseline → current</th></tr></thead>
+    <tbody>{goal_school_table_rows}</tbody>
+  </table>
+"""
 
     payload_json = json.dumps(aggregates, indent=2)
     html = f"""<!DOCTYPE html>
@@ -433,8 +726,10 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     body {{ font-family: system-ui, sans-serif; margin: 24px; color: #1f2328; background: #fff; }}
     h1 {{ font-size: 1.5rem; margin-bottom: 8px; }}
     h2 {{ font-size: 1.1rem; margin: 32px 0 8px; }}
+    h3 {{ font-size: 1rem; margin: 24px 0 8px; color: #57606a; }}
     .caption {{ color: #57606a; font-size: 0.85rem; margin: 4px 0 16px; }}
     .warning {{ background: #fff8c5; border: 1px solid #d4a72c; padding: 12px 16px; border-radius: 6px; margin: 16px 0; }}
+    .glossary {{ background: #f6f8fa; border: 1px solid #d0d7de; padding: 12px 16px; border-radius: 6px; margin: 16px 0; }}
     .stats {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }}
     .stat {{ border: 1px solid #d0d7de; border-radius: 6px; padding: 12px; }}
     .stat-value {{ font-size: 1.6rem; font-weight: 600; }}
@@ -447,43 +742,55 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     .chart-title {{ font: 600 13px system-ui; fill: #1f2328; }}
     .axis-label {{ font: 11px system-ui; fill: #57606a; }}
     .legend {{ font: 11px system-ui; text-anchor: end; }}
+    .data-label {{ font: 10px system-ui; fill: #1f2328; }}
     .grid-line {{ stroke: #d0d7de; stroke-width: 1; }}
   </style>
 </head>
 <body>
   <h1>Cross-year trend report</h1>
-  <p class="caption">Source: artifacts/trends/cross_year · {aggregates.get("pair_count", 0)} transitions · mean regressions {mean_regressions}</p>
+  <p class="caption">Source: artifacts/trends/cross_year · {aggregates.get("pair_count", 0)} School Year EOY comparisons · {aggregates.get("eoy_snapshot_count", 0)} EOY snapshots · mean issue counts increased {mean_regressions}</p>
+
+  <div class="glossary">
+    <strong>How to read this report</strong>
+    <ul>
+      <li><strong>Changed issue count</strong> — one issue-flag or flagged-row metric that differed between snapshots.</li>
+      <li><strong>Issue count increased</strong> — a changed issue count where the value went up (data-quality decline).</li>
+      <li><strong>Meets Target</strong> — for a Goal–Metric row with Baseline and Target set, the latest filled Grading Period value satisfies the Target for that Metric.</li>
+      <li><strong>Goal–Metric rows with Baseline and Target</strong> — rows from Student Metrics Summary where both Baseline and Target columns are set; denominator for % meets Target.</li>
+    </ul>
+  </div>
 
   <div class="warning">
     <strong>Caveats</strong>
     <ul>
-      <li>Latest pair compares SY24-25 EOY to SY25-26 Q2 — periods are not aligned.</li>
-      <li><code>grading_period_fill_delta</code> in the latest pair reflects snapshot timing, not data quality decline.</li>
-    </ul>
+{caveats_html}    </ul>
   </div>
 
-  {headline_html}
+  <h2>Student Metrics Summary data quality</h2>
+  <p class="caption">Issue flags and completeness checks from Student Metrics Summary snapshots</p>
+  {audit_headline_html}
 
-  <h2>Volume timeline</h2>
-  <p class="caption">Y-axis: row count · X-axis: current school year at end of each transition</p>
+  <h3>Volume timeline</h3>
+  <p class="caption">Y-axis: count of changed issue metrics · X-axis: School Year at end of each comparison</p>
   <div class="chart">{volume_svg}</div>
 
-  <h2>Movement composition</h2>
-  <p class="caption">Stacked movement counts by type per transition</p>
+  <h3>Movement composition</h3>
+  <p class="caption">Stacked changed issue counts by type per School Year comparison</p>
   <div class="chart">{composition_svg}</div>
 
-  <h2>Global issue trajectory</h2>
-  <p class="caption">Current-period global issue row counts from trend_movements.csv</p>
+  <h3>Global issue trajectory</h3>
+  <p class="caption">Portfolio-wide issue row counts from each School Year EOY snapshot</p>
   <div class="chart">{global_svg}</div>
 
-  <h2>School regression leaderboard</h2>
-  <p class="caption">Latest transition only · regressions per school site</p>
+  <h3>Schools with most issue increases</h3>
+  <p class="caption">Latest School Year comparison only · issue counts increased per School</p>
   <div class="chart">{school_svg}</div>
   <table>
-    <thead><tr><th>School</th><th>Regressions</th><th>Top issue code</th></tr></thead>
+    <thead><tr><th>School</th><th>Issue counts increased</th><th>Top issue flag</th></tr></thead>
     <tbody>{school_table_rows}</tbody>
   </table>
 
+{goal_section_html}
   <script type="application/json" id="cross-year-data">{payload_json}</script>
 </body>
 </html>

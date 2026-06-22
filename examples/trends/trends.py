@@ -74,6 +74,14 @@ MOVEMENT_FIELDS = (
     "is_regression",
 )
 
+GOAL_PROGRESS_STATUS_ORDER = audit.PROGRESS_STATUS_ORDER
+PROGRESS_STATUS_RANK = {
+    "on_track": 2,
+    "off_track": 1,
+    "no_progress_data": 0,
+    "indeterminate": 0,
+}
+
 
 def default_inputs_dir() -> Path:
     explicit = (os.environ.get("TREND_INPUTS_DIR") or "").strip()
@@ -598,6 +606,21 @@ def snapshot_slot(snapshots_dir: Path, school_year: str, period: str) -> Path:
     return snapshots_dir / school_year / period
 
 
+def discover_eoy_snapshot_years(snapshots_dir: Path) -> list[str]:
+    """School years that have a captured EOY snapshot directory."""
+    if not snapshots_dir.is_dir():
+        return []
+    years: list[str] = []
+    for entry in snapshots_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / FALLBACK_PERIOD).is_dir():
+            years.append(entry.name)
+    import config
+
+    return sorted(years, key=config._school_year_sort_key)
+
+
 def build_school_rollup(detail_rows: list[dict[str, Any]]) -> dict[str, Any]:
     schools: dict[str, dict[str, Any]] = {}
     for row in detail_rows:
@@ -709,6 +732,7 @@ def capture_snapshot(
     )
     school_rollup = build_school_rollup(met_results.get("detail_rows") or [])
     grading_period_stats = audit.grading_period_fill_stats(met_wb, audit_cfg.sheet_name)
+    progress_payload = audit.progress_rollup(met_wb, audit_cfg.sheet_name)
 
     if slot.exists() and force:
         shutil.rmtree(slot)
@@ -721,10 +745,12 @@ def capture_snapshot(
     met_json = met_dir / "audit_summary.json"
     rollup_json = met_dir / "school_rollup.json"
     grading_json = met_dir / "grading_period_stats.json"
+    progress_json = met_dir / "progress_rollup.json"
     _write_json(acc_json, acc_payload)
     _write_json(met_json, met_payload)
     _write_json(rollup_json, school_rollup)
     _write_json(grading_json, grading_period_stats)
+    _write_json(progress_json, progress_payload)
     if acc_wb is not None:
         accreditation.write_csv(acc_dir / "all_flags.csv", acc_results["all_flags"])
 
@@ -745,6 +771,7 @@ def capture_snapshot(
             "metrics/audit_summary.json": _file_hash(met_json),
             "metrics/school_rollup.json": _file_hash(rollup_json),
             "metrics/grading_period_stats.json": _file_hash(grading_json),
+            "metrics/progress_rollup.json": _file_hash(progress_json),
         },
     }
     _write_json(slot / "snapshot.json", meta)
@@ -1031,6 +1058,147 @@ def _compare_metrics(
     return rows
 
 
+def _progress_counts(rollup: dict[str, Any]) -> dict[str, int]:
+    global_counts = rollup.get("global") or {}
+    return {
+        status: int(global_counts.get(status, 0))
+        for status in GOAL_PROGRESS_STATUS_ORDER
+    }
+
+
+def _progress_on_track_pct(rollup: dict[str, Any]) -> float | None:
+    counts = _progress_counts(rollup)
+    tracked = counts["on_track"] + counts["off_track"]
+    if tracked == 0:
+        return None
+    return round(100 * counts["on_track"] / tracked, 1)
+
+
+def _compare_goal_progress(
+    base_rollup: dict[str, Any],
+    curr_rollup: dict[str, Any],
+) -> dict[str, Any]:
+    movements: list[dict[str, Any]] = []
+    base_index = base_rollup.get("progress_index") or {}
+    curr_index = curr_rollup.get("progress_index") or {}
+
+    for metric in ("on_track", "off_track"):
+        bv = int((base_rollup.get("global") or {}).get(metric, 0))
+        cv = int((curr_rollup.get("global") or {}).get(metric, 0))
+        if bv == cv:
+            continue
+        is_regression = (metric == "on_track" and cv < bv) or (metric == "off_track" and cv > bv)
+        movements.append(
+            _movement_row(
+                stream="goal_progress",
+                entity_key="global",
+                entity_label="global",
+                metric=metric,
+                baseline=bv,
+                current=cv,
+                movement_type=f"goal_{metric}_delta",
+                is_regression=is_regression,
+            )
+        )
+
+    row_level = {
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 0,
+        "appeared": 0,
+        "dropped": 0,
+    }
+    all_keys = sorted(set(base_index) | set(curr_index))
+    for key in all_keys:
+        base_status = base_index.get(key)
+        curr_status = curr_index.get(key)
+        if base_status is None:
+            row_level["appeared"] += 1
+            continue
+        if curr_status is None:
+            row_level["dropped"] += 1
+            continue
+        base_rank = PROGRESS_STATUS_RANK.get(str(base_status), 0)
+        curr_rank = PROGRESS_STATUS_RANK.get(str(curr_status), 0)
+        if curr_rank > base_rank:
+            row_level["improved"] += 1
+            movements.append(
+                _movement_row(
+                    stream="goal_progress",
+                    entity_key=key,
+                    entity_label=key.split("|", 2)[1] if "|" in key else key,
+                    metric="progress_status",
+                    baseline=base_status,
+                    current=curr_status,
+                    movement_type="progress_improved",
+                    is_regression=False,
+                )
+            )
+        elif curr_rank < base_rank:
+            row_level["worsened"] += 1
+            movements.append(
+                _movement_row(
+                    stream="goal_progress",
+                    entity_key=key,
+                    entity_label=key.split("|", 2)[1] if "|" in key else key,
+                    metric="progress_status",
+                    baseline=base_status,
+                    current=curr_status,
+                    movement_type="progress_worsened",
+                    is_regression=True,
+                )
+            )
+        else:
+            row_level["unchanged"] += 1
+
+    regressions = [row for row in movements if row.get("is_regression")]
+    school_changes: list[dict[str, Any]] = []
+    base_schools = base_rollup.get("schools") or {}
+    curr_schools = curr_rollup.get("schools") or {}
+    for school in sorted(set(base_schools) | set(curr_schools)):
+        base_pct = _school_on_track_pct(base_schools.get(school, {}))
+        curr_pct = _school_on_track_pct(curr_schools.get(school, {}))
+        if base_pct is None or curr_pct is None:
+            continue
+        school_changes.append(
+            {
+                "school": school,
+                "baseline_on_track_pct": base_pct,
+                "current_on_track_pct": curr_pct,
+                "delta_pct": round(curr_pct - base_pct, 1),
+            }
+        )
+    school_changes.sort(key=lambda row: row["delta_pct"])
+
+    return {
+        "baseline": {
+            "global": _progress_counts(base_rollup),
+            "eligible_rows": int(base_rollup.get("eligible_rows", 0)),
+            "on_track_pct": _progress_on_track_pct(base_rollup),
+        },
+        "current": {
+            "global": _progress_counts(curr_rollup),
+            "eligible_rows": int(curr_rollup.get("eligible_rows", 0)),
+            "on_track_pct": _progress_on_track_pct(curr_rollup),
+        },
+        "movement_count": len(movements),
+        "regression_count": len(regressions),
+        "row_level": row_level,
+        "school_changes": school_changes,
+        "movements": movements,
+        "regressions": regressions,
+    }
+
+
+def _school_on_track_pct(school_counts: dict[str, Any]) -> float | None:
+    on_track = int(school_counts.get("on_track", 0))
+    off_track = int(school_counts.get("off_track", 0))
+    tracked = on_track + off_track
+    if tracked == 0:
+        return None
+    return round(100 * on_track / tracked, 1)
+
+
 def _snapshot_compare_warnings(base_slot: Path, curr_slot: Path) -> list[str]:
     warnings: list[str] = []
     base_meta_path = base_slot / "snapshot.json"
@@ -1059,13 +1227,15 @@ def _snapshot_compare_warnings(base_slot: Path, curr_slot: Path) -> list[str]:
 
 def load_snapshot_payloads(
     slot: Path,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, int], dict[str, Any]]:
     acc = _load_json(slot / "accreditation" / "monitoring_summary.json")
     met = _load_json(slot / "metrics" / "audit_summary.json")
     rollup = _load_json(slot / "metrics" / "school_rollup.json")
     grading_path = slot / "metrics" / "grading_period_stats.json"
     grading = _load_json(grading_path) if grading_path.is_file() else {}
-    return acc, met, rollup, grading
+    progress_path = slot / "metrics" / "progress_rollup.json"
+    progress = _load_json(progress_path) if progress_path.is_file() else {}
+    return acc, met, rollup, grading, progress
 
 
 def _compare_snapshot_slots(
@@ -1085,8 +1255,8 @@ def _compare_snapshot_slots(
     if not curr_slot.is_dir():
         raise FileNotFoundError(f"current snapshot not found: {curr_slot}")
 
-    base_acc, base_met, base_rollup, base_gp = load_snapshot_payloads(base_slot)
-    curr_acc, curr_met, curr_rollup, curr_gp = load_snapshot_payloads(curr_slot)
+    base_acc, base_met, base_rollup, base_gp, base_progress = load_snapshot_payloads(base_slot)
+    curr_acc, curr_met, curr_rollup, curr_gp, curr_progress = load_snapshot_payloads(curr_slot)
     warnings = _snapshot_compare_warnings(base_slot, curr_slot)
     for warning in warnings:
         print(f"warning: {school_year} {baseline_period} vs {current_period}: {warning}", file=sys.stderr)
@@ -1111,6 +1281,20 @@ def _compare_snapshot_slots(
         )
     )
 
+    goal_progress: dict[str, Any] | None = None
+    if base_progress and curr_progress:
+        goal_progress = _compare_goal_progress(base_progress, curr_progress)
+    elif not base_progress or not curr_progress:
+        missing = []
+        if not base_progress:
+            missing.append("baseline progress_rollup.json")
+        if not curr_progress:
+            missing.append("current progress_rollup.json")
+        print(
+            f"warning: {school_year} goal progress skipped ({', '.join(missing)} missing)",
+            file=sys.stderr,
+        )
+
     regressions = [row for row in movements if row.get("is_regression")]
     by_type: Counter[str] = Counter(row["movement_type"] for row in movements)
     by_stream: Counter[str] = Counter(row["stream"] for row in movements)
@@ -1131,6 +1315,7 @@ def _compare_snapshot_slots(
         "warnings": warnings,
         "movements": movements,
         "regressions": regressions,
+        "goal_progress": goal_progress,
     }
 
 
@@ -1180,6 +1365,40 @@ def compare_cross_year_snapshots(
     )
 
 
+def backfill_progress_rollups(
+    snapshots_dir: Path,
+    *,
+    force: bool = False,
+) -> int:
+    manifest = load_manifest(snapshots_dir)
+    updated = 0
+    for entry in manifest.get("snapshots", []):
+        rel = str(entry.get("path", ""))
+        if not rel:
+            continue
+        slot = snapshots_dir / rel
+        progress_path = slot / "metrics" / "progress_rollup.json"
+        if progress_path.is_file() and not force:
+            continue
+        meta_path = slot / "snapshot.json"
+        if not meta_path.is_file():
+            continue
+        meta = _load_json(meta_path)
+        metrics_wb = (meta.get("source_workbooks") or {}).get("metrics")
+        if not metrics_wb or not Path(metrics_wb).is_file():
+            continue
+        sheet = (meta.get("audit_config") or {}).get("sheet_name", audit.DEFAULT_SHEET)
+        progress_payload = audit.progress_rollup(Path(metrics_wb), sheet)
+        met_dir = slot / "metrics"
+        met_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(progress_path, progress_payload)
+        meta["content_hashes"] = meta.get("content_hashes") or {}
+        meta["content_hashes"]["metrics/progress_rollup.json"] = _file_hash(progress_path)
+        _write_json(meta_path, meta)
+        updated += 1
+    return updated
+
+
 def run_cross_year_compares(
     school_years: list[str],
     *,
@@ -1187,28 +1406,22 @@ def run_cross_year_compares(
     output_dir: Path,
     regression_threshold: float,
 ) -> int:
-    import config
-
-    ordered = sorted(school_years, key=config._school_year_sort_key)
-    manifest = load_manifest(snapshots_dir)
+    backfilled = backfill_progress_rollups(snapshots_dir)
+    if backfilled:
+        print(f"backfilled progress_rollup.json for {backfilled} snapshot(s)")
+    ordered = discover_eoy_snapshot_years(snapshots_dir)
+    if school_years:
+        allowed = set(school_years)
+        ordered = [school_year for school_year in ordered if school_year in allowed]
     exit_code = 0
     for index in range(1, len(ordered)):
         prior_sy = ordered[index - 1]
         curr_sy = ordered[index]
         prior_slot = snapshot_slot(snapshots_dir, prior_sy, FALLBACK_PERIOD)
-        if not prior_slot.is_dir():
+        curr_slot = snapshot_slot(snapshots_dir, curr_sy, FALLBACK_PERIOD)
+        if not prior_slot.is_dir() or not curr_slot.is_dir():
             continue
-        curr_entries = [
-            entry
-            for entry in manifest.get("snapshots", [])
-            if entry.get("school_year") == curr_sy
-        ]
-        if not curr_entries:
-            continue
-        curr_period = sorted(
-            {str(entry.get("period")) for entry in curr_entries},
-            key=period_sort_key,
-        )[0]
+        curr_period = FALLBACK_PERIOD
         pair_name = f"{prior_sy}_{FALLBACK_PERIOD}_vs_{curr_sy}_{curr_period}"
         pair_dir = output_dir / "cross_year" / pair_name
         try:
@@ -1231,7 +1444,7 @@ def run_cross_year_compares(
     from visualize import build_cross_year_aggregates, load_cross_year_summaries, render_cross_year_html
 
     if load_cross_year_summaries(output_dir):
-        aggregates = build_cross_year_aggregates(output_dir)
+        aggregates = build_cross_year_aggregates(output_dir, snapshots_dir=snapshots_dir)
         report_path = output_dir / "cross_year" / "index.html"
         render_cross_year_html(aggregates, report_path)
         print(f"cross-year report: {report_path}")
@@ -1254,11 +1467,30 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
         "regression_flags": output_dir / "regression_flags.csv",
         "trend_summary_json": output_dir / "trend_summary.json",
         "trend_summary_md": output_dir / "trend_summary.md",
+        "goal_progress_summary_json": output_dir / "goal_progress_summary.json",
+        "goal_progress_movements": output_dir / "goal_progress_movements.csv",
     }
     _write_movements_csv(paths["trend_movements"], payload.get("movements") or [])
     _write_movements_csv(paths["regression_flags"], payload.get("regressions") or [])
 
-    summary = {k: v for k, v in payload.items() if k not in {"movements", "regressions"}}
+    goal_progress = payload.get("goal_progress")
+    if goal_progress:
+        goal_summary = {k: v for k, v in goal_progress.items() if k not in {"movements", "regressions"}}
+        _write_json(paths["goal_progress_summary_json"], goal_summary)
+        _write_movements_csv(paths["goal_progress_movements"], goal_progress.get("movements") or [])
+    else:
+        paths.pop("goal_progress_summary_json")
+        paths.pop("goal_progress_movements")
+
+    summary = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"movements", "regressions", "goal_progress"}
+    }
+    if goal_progress:
+        summary["goal_progress_summary"] = {
+            k: v for k, v in goal_progress.items() if k not in {"movements", "regressions"}
+        }
     _write_json(paths["trend_summary_json"], summary)
 
     lines = [
@@ -1280,13 +1512,31 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
             f"- **Current:** {payload.get('current_period', '')}",
             f"- **Compared at:** {payload.get('compared_at', '')}",
             "",
-            "## Counts",
+            "## Student Metrics Summary data quality",
             "",
-            f"- Movements: **{payload.get('movement_count', 0)}**",
-            f"- Regressions: **{payload.get('regression_count', 0)}**",
+            f"- Changed issue counts: **{payload.get('movement_count', 0)}**",
+            f"- Issue counts increased: **{payload.get('regression_count', 0)}**",
             "",
         ]
     )
+    if goal_progress:
+        current = goal_progress.get("current") or {}
+        baseline = goal_progress.get("baseline") or {}
+        row_level = goal_progress.get("row_level") or {}
+        lines.extend(
+            [
+                "## Goal progress",
+                "",
+                f"- Goal–Metric rows with Baseline and Target (baseline EOY): **{baseline.get('eligible_rows', 0)}**",
+                f"- Goal–Metric rows with Baseline and Target (current EOY): **{current.get('eligible_rows', 0)}**",
+                f"- % meets Target (baseline EOY): **{baseline.get('on_track_pct', 'n/a')}**",
+                f"- % meets Target (current EOY): **{current.get('on_track_pct', 'n/a')}**",
+                f"- Goal progress movements: **{goal_progress.get('movement_count', 0)}**",
+                f"- Goal–Metric rows improved: **{row_level.get('improved', 0)}**",
+                f"- Goal–Metric rows worsened: **{row_level.get('worsened', 0)}**",
+                "",
+            ]
+        )
     warnings = payload.get("warnings") or []
     if warnings:
         lines.append("## Warnings")
