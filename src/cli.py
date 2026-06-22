@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # cisiphyus: chrome-profile cisdm export retriever (report fetch + bootstrap)
 # usage:
+#   cisiphyus [--help|-h|help]
 #   cisiphyus student_metrics_summary
 #   cisiphyus pull student_metrics_summary --school-year SY24-25
 #   cisiphyus --bootstrap
@@ -19,6 +20,7 @@ import sys
 
 import config
 import example_cli
+import help_text
 
 
 def __getattr__(name: str):
@@ -118,6 +120,10 @@ def _maybe_run_pull(argv: list[str]) -> bool:
 
 
 def main() -> None:
+    if help_text.wants_full_help(sys.argv):
+        print(help_text.format_full_help(build_retrieval_parser=_build_retrieval_parser))
+        raise SystemExit(0)
+
     config.migrate_legacy_layout()
 
     if _maybe_run_pull(sys.argv):
