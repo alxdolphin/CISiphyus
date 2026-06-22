@@ -802,6 +802,119 @@ def baseline_target_status(record: RowRecord) -> str:
     return "both_present"
 
 
+ProgressStatus = Literal["on_track", "off_track", "no_progress_data", "indeterminate"]
+PROGRESS_STATUS_ORDER = ("on_track", "off_track", "no_progress_data", "indeterminate")
+
+
+def latest_grading_period_value(record: RowRecord) -> str | None:
+    for header in reversed(GRADING_PERIOD_HEADERS):
+        text = _text(record, header)
+        if not is_blank(text):
+            return clean_value(text)
+    return None
+
+
+def progress_meets_target(
+    metric: str | None,
+    progress: str | None,
+    target: str | None,
+) -> bool | None:
+    direction = metric_direction(metric)
+    if direction == "none":
+        return None
+    progress_text = clean_value(progress)
+    target_text = clean_value(target)
+    if progress_text is None or target_text is None:
+        return None
+
+    progress_num = parse_number(progress_text)
+    target_num = parse_number(target_text)
+    if progress_num is not None and target_num is not None:
+        if direction == "higher_is_better":
+            return progress_num >= target_num
+        if direction == "lower_is_better":
+            return progress_num <= target_num
+        return None
+
+    progress_grade = normalize_grade(progress_text)
+    target_grade = normalize_grade(target_text)
+    if (
+        progress_grade in GRADE_SCALE
+        and target_grade in GRADE_SCALE
+        and progress_grade is not None
+        and target_grade is not None
+    ):
+        progress_rank = GRADE_RANK.get(progress_grade)
+        target_rank = GRADE_RANK.get(target_grade)
+        if progress_rank is None or target_rank is None:
+            return None
+        if direction == "higher_is_better":
+            return progress_rank >= target_rank
+        if direction == "lower_is_better":
+            return progress_rank <= target_rank
+    return None
+
+
+def progress_status_for_record(record: RowRecord) -> ProgressStatus:
+    if baseline_target_status(record) != "both_present":
+        return "no_progress_data"
+    progress = latest_grading_period_value(record)
+    if progress is None:
+        return "no_progress_data"
+    metric = _text(record, "Metric")
+    if not value_matches_scale(metric, progress):
+        return "indeterminate"
+    meets = progress_meets_target(metric, progress, _text(record, "Target"))
+    if meets is None:
+        return "indeterminate"
+    return "on_track" if meets else "off_track"
+
+
+def progress_row_key(record: RowRecord) -> str:
+    return "|".join(
+        clean_value(_text(record, field)) or ""
+        for field in ("Student ID", "School", "Goal", "Metric")
+    )
+
+
+def _empty_progress_counts() -> dict[str, int]:
+    return {status: 0 for status in PROGRESS_STATUS_ORDER}
+
+
+def progress_rollup_from_records(records: list[RowRecord]) -> dict[str, Any]:
+    global_counts: Counter[str] = Counter()
+    schools: dict[str, Counter[str]] = defaultdict(Counter)
+    progress_index: dict[str, str] = {}
+    eligible_rows = 0
+
+    for record in records:
+        if baseline_target_status(record) != "both_present":
+            continue
+        eligible_rows += 1
+        status = progress_status_for_record(record)
+        global_counts[status] += 1
+        school = clean_value(_text(record, "School")) or "(unknown)"
+        schools[school][status] += 1
+        progress_index[progress_row_key(record)] = status
+
+    return {
+        "global": {status: int(global_counts.get(status, 0)) for status in PROGRESS_STATUS_ORDER},
+        "schools": {
+            school: {status: int(counts.get(status, 0)) for status in PROGRESS_STATUS_ORDER}
+            for school, counts in sorted(schools.items())
+        },
+        "eligible_rows": eligible_rows,
+        "progress_index": progress_index,
+    }
+
+
+def progress_rollup(
+    workbook_path: Path,
+    sheet_name: str = DEFAULT_SHEET,
+) -> dict[str, Any]:
+    return progress_rollup_from_records(load_rows(workbook_path, sheet_name))
+
+
 def grading_period_count(record: RowRecord) -> int:
     return sum(1 for header in GRADING_PERIOD_HEADERS if not is_blank(_text(record, header)))
 

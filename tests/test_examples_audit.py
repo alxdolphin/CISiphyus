@@ -205,3 +205,17 @@ def test_cli_resolves_workbook_via_cisiphyus_fetch(tmp_path: Path, monkeypatch) 
             code = audit.main([])
     assert code == 0
     export_mock.assert_called_once()
+
+
+def test_progress_status_on_track_for_fixture_row(tmp_path: Path) -> None:
+    records = audit.load_student_metrics_workbook(_workbook(tmp_path))
+    first = records[0]
+    assert audit.progress_status_for_record(first) == "off_track"
+
+
+def test_progress_rollup_counts_eligible_rows(tmp_path: Path) -> None:
+    workbook = _workbook(tmp_path)
+    rollup = audit.progress_rollup(workbook)
+    assert rollup["eligible_rows"] > 0
+    assert "on_track" in rollup["global"]
+    assert "progress_index" in rollup
