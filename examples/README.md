@@ -86,10 +86,28 @@ archived under `artifacts/archives/{school-year}/EOY/`, and captured as
 consecutive EOY snapshots (prior school year EOY vs next school year EOY). Years
 without an EOY snapshot are skipped until one is captured.
 
+`cisiphyus trend cross-year` (alias `cisiphyus trend eoy`) pulls fresh CISDM exports,
+refreshes EOY snapshots, runs cross-year compares, and writes
+`artifacts/trends/cross_year/index.html`. Use `--no-fetch` to regenerate HTML only.
+
+```bash
+cisiphyus trend cross-year
+cisiphyus trend eoy
+cisiphyus trend eoy --no-fetch
+```
+
+Trend pulls **student metrics only** by default. Accreditation is skipped unless
+`ACCREDITATION_FETCH_FROM_CISDM=1` or you pass `--accreditation` on `trend` / `eoy`.
+
+```bash
+cisiphyus trend eoy --accreditation
+ACCREDITATION_FETCH_FROM_CISDM=1 cisiphyus trend SY25-26
+```
+
 The cross-year HTML report has two sections:
 
-- **Student Metrics Summary data quality** — changed issue counts and issue counts increased (issue-flag / flagged-row deltas).
-- **Goal progress** — Goal–Metric rows with Baseline and Target where the latest filled Grading Period value is compared to Target; includes % meets Target and School Year–over–School Year Goal–Metric row improved/worsened counts.
+- **Student Metrics summary totals** — aggregate audit totals compared between EOY files (different rosters each year; not the same students tracked).
+- **Student goal progress** — on-track rate and year-over-year goals improved / fell behind for matched student goal rows.
 
 Snapshots store `metrics/progress_rollup.json` for goal progress. Re-run `backfill_progress_rollups` or `cisiphyus trend --all` to populate historical snapshots.
 

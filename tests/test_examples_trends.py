@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -222,6 +223,76 @@ def test_pull_school_year_backfill_historical_metrics(tmp_path: Path, monkeypatc
     assert archived.is_file()
 
 
+def test_pull_workbooks_skips_accreditation_without_flag(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ACCREDITATION_FETCH_FROM_CISDM", raising=False)
+    metrics_src = tmp_path / "metrics.xlsx"
+    _metrics_workbook(metrics_src)
+    with patch.object(trends.accreditation, "fetch_accreditation_workbook") as acc_fetch:
+        with patch.object(
+            trends.audit,
+            "fetch_student_metrics_workbook",
+            return_value=trends.audit.FetchResult(
+                destination=metrics_src,
+                triggered=True,
+                succeeded=True,
+                reason="forced",
+            ),
+        ) as met_fetch:
+            acc_path, met_path = trends.pull_workbooks(
+                school_year="SY25-26",
+                force_fetch=True,
+            )
+    acc_fetch.assert_not_called()
+    met_fetch.assert_called_once()
+    assert acc_path is None
+    assert met_path == metrics_src.resolve()
+
+
+def test_pull_workbooks_includes_accreditation_when_flagged(tmp_path: Path) -> None:
+    metrics_src = tmp_path / "metrics.xlsx"
+    accred_src = tmp_path / "accred.xlsx"
+    _metrics_workbook(metrics_src)
+    accred_src.write_bytes(b"x")
+    with patch.object(
+        trends.accreditation,
+        "fetch_accreditation_workbook",
+        return_value=trends.accreditation.FetchResult(
+            destination=accred_src,
+            triggered=True,
+            succeeded=True,
+            reason="forced",
+        ),
+    ) as acc_fetch:
+        with patch.object(
+            trends.audit,
+            "fetch_student_metrics_workbook",
+            return_value=trends.audit.FetchResult(
+                destination=metrics_src,
+                triggered=True,
+                succeeded=True,
+                reason="forced",
+            ),
+        ):
+            acc_path, met_path = trends.pull_workbooks(
+                school_year="SY25-26",
+                force_fetch=True,
+                include_accreditation=True,
+            )
+    acc_fetch.assert_called_once()
+    assert acc_path == accred_src.resolve()
+    assert met_path == metrics_src.resolve()
+
+
+def test_resolve_period_workbooks_metrics_only(tmp_path: Path) -> None:
+    inputs = tmp_path / "archives"
+    met = _metrics_workbook(inputs / "SY25-26" / "EOY" / "metrics.xlsx")
+    resolved = trends.resolve_period_workbooks("SY25-26", "EOY", inputs_dir=inputs)
+    assert resolved is not None
+    acc, met_out = resolved
+    assert acc is None
+    assert met_out == met
+
+
 def test_pull_school_year_backfill_skips_when_cached(tmp_path: Path, monkeypatch) -> None:
     inputs = tmp_path / "archives"
     _seed_period_inputs(inputs, "SY24-25", trends.FALLBACK_PERIOD)
@@ -289,7 +360,11 @@ def test_trend_uses_cached_pulls_and_cisiphyus_for_latest(tmp_path: Path, monkey
 
     with patch.object(trends, "pull_workbooks", return_value=(pull_acc, pull_met)) as pull:
         assert trends.main_trend(["TEST"]) == 0
-        pull.assert_called_once_with(school_year="TEST", force_fetch=True)
+        pull.assert_called_once_with(
+            school_year="TEST",
+            force_fetch=True,
+            include_accreditation=None,
+        )
 
     assert trends.resolve_period_workbooks("TEST", "Q2", inputs_dir=inputs) is not None
     manifest = trends.load_manifest(snapshots)
@@ -489,7 +564,7 @@ def test_compare_summary_omits_related_work_section(tmp_path: Path) -> None:
     )
     paths = trends.export_trend_results(payload, tmp_path / "out")
     md = Path(paths["trend_summary_md"]).read_text(encoding="utf-8")
-    assert "Student Metrics Summary data quality" in md
+    assert "Student Metrics summary totals" in md
     assert "Related work" not in md
     assert "Monday" not in md
     assert "monday.com" not in md
@@ -648,6 +723,29 @@ def test_render_cross_year_html_writes_expected_labels(tmp_path: Path) -> None:
     import visualize
 
     output_dir = tmp_path / "trends"
+    snapshots_dir = tmp_path / "snapshots"
+    gar_dir = tmp_path / "goal_achievement"
+    gar_dir.mkdir()
+    for school_year, exceptions in (("SY24-25", 100), ("SY25-26", 120)):
+        metrics_dir = snapshots_dir / school_year / "EOY" / "metrics"
+        metrics_dir.mkdir(parents=True)
+        (metrics_dir / "progress_rollup.json").write_text(
+            json.dumps({"eligible_rows": 500, "global": {}}),
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "exception_type": "goal_achievement_mismatch",
+                "home_school": "Alpha School",
+                "metric": "Attendance Rate (%)",
+            }
+        ] * exceptions
+        fieldnames = ["exception_type", "home_school", "metric"]
+        csv_path = gar_dir / f"{school_year}_GoalAchievement_AUDIT.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
     _write_cross_year_pair(
         output_dir,
         pair_name="SY24-25_EOY_vs_SY25-26_Q2",
@@ -706,21 +804,135 @@ def test_render_cross_year_html_writes_expected_labels(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    aggregates = visualize.build_cross_year_aggregates(output_dir)
+    aggregates = visualize.build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=gar_dir,
+    )
     visualize.render_cross_year_html(aggregates, report_path)
     html = report_path.read_text(encoding="utf-8")
-    assert "Cross-year trend report" in html
+    assert "School Year trends" in html
     assert "Monday" not in html
     assert "SY25-26" in html
     assert "Alpha School" in html
-    assert "Changed issue counts" in html
-    assert "Issue counts increased" in html
+    assert "Goal achievement exceptions (latest EOY)" not in html
+    assert "Change vs prior EOY" in html
+    assert "Goals with baseline and target" in html
+    assert "Schools with exceptions" in html
+    assert "<td>SY24-25</td>" in html
+    assert "<td>SY25-26</td>" in html
+    assert 'class="latest-row"' in html
+    assert "Goal achievement exceptions at each EOY" in html
+    assert "Goal achievement exceptions by type at each EOY" in html
+    assert "Goal achievement exceptions" in html
+    assert "Different rosters each year" in html
     assert "grading_period_fill_delta" in html
-    assert "Goal–Metric rows with Baseline and Target" in html
-    assert "120 Goal–Metric rows" in html
+    assert "student goal rows with Baseline and Target" in html
+    assert "120 student goal rows" in html
     assert 'class="data-label"' in html
-    assert ">12</text>" in html
-    assert ">5</text>" in html
+    assert ">120</text>" in html
+    assert ">100</text>" in html
+    assert ">+20</td>" in html
+
+
+def test_build_eoy_exception_summary_delta_skips_missing_years() -> None:
+    import visualize
+
+    summary = visualize.build_eoy_exception_summary(
+        ["SY23-24", "SY24-25", "SY25-26"],
+        [100, None, 120],
+        [500, 600, 700],
+        [3, None, 1],
+    )
+    assert summary[0]["exception_delta"] is None
+    assert summary[1]["exceptions"] is None
+    assert summary[2]["exception_delta"] == 20
+    assert summary[2]["schools_with_exceptions"] == 1
+
+
+def test_transition_pair_label() -> None:
+    import visualize
+
+    assert (
+        visualize._transition_pair_label(
+            {"baseline_school_year": "SY18-19", "current_school_year": "SY19-20"}
+        )
+        == "SY18-19→SY19-20"
+    )
+
+
+def test_svg_stacked_bar_chart_segment_labels() -> None:
+    import visualize
+
+    svg = visualize._svg_stacked_bar_chart(
+        width=400,
+        height=200,
+        categories=["SY24-25→SY25-26"],
+        series=[
+            {"name": "a", "data": [40]},
+            {"name": "b", "data": [20]},
+        ],
+        y_label="Stacked test",
+        show_totals=True,
+    )
+    assert ">40</text>" in svg
+    assert ">20</text>" in svg
+    assert ">60</text>" in svg
+
+
+def test_exception_count_series_in_html(tmp_path: Path) -> None:
+    import visualize
+
+    output_dir = tmp_path / "trends"
+    snapshots_dir = tmp_path / "snapshots"
+    gar_dir = tmp_path / "goal_achievement"
+    gar_dir.mkdir()
+    metrics_dir = snapshots_dir / "SY25-26" / "EOY" / "metrics"
+    metrics_dir.mkdir(parents=True)
+    (metrics_dir / "progress_rollup.json").write_text(
+        json.dumps({"eligible_rows": 200, "global": {}}),
+        encoding="utf-8",
+    )
+    csv_path = gar_dir / "SY25-26_GoalAchievement_AUDIT.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["exception_type", "home_school", "metric"],
+        )
+        writer.writeheader()
+        for _ in range(42):
+            writer.writerow(
+                {
+                    "exception_type": "goal_achievement_mismatch",
+                    "home_school": "Alpha School",
+                    "metric": "Tardies",
+                }
+            )
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY24-25_EOY_vs_SY25-26_EOY",
+        summary={
+            "current_school_year": "SY25-26",
+            "baseline_school_year": "SY24-25",
+            "baseline_period": "EOY",
+            "current_period": "EOY",
+            "movement_count": 12,
+            "regression_count": 5,
+            "movements_by_type": {},
+        },
+        movements=[],
+        regressions=[],
+    )
+    aggregates = visualize.build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=gar_dir,
+    )
+    report_path = output_dir / "cross_year" / "index.html"
+    visualize.render_cross_year_html(aggregates, report_path)
+    html = report_path.read_text(encoding="utf-8")
+    assert "Goal achievement exceptions at each EOY" in html
+    assert ">42</text>" in html
 
 
 def test_svg_line_chart_value_labels() -> None:
@@ -804,6 +1016,7 @@ def test_run_cross_year_compares_writes_html_report(tmp_path: Path) -> None:
     )
     assert aggregates["pair_count"] == 1
     assert aggregates["eoy_snapshot_count"] == 2
+    assert len(aggregates["exception_count_series"]) == 2
 
 
 def test_run_cross_year_compares_skips_without_eoy_snapshot(tmp_path: Path) -> None:
@@ -859,3 +1072,153 @@ def test_discover_eoy_snapshot_years(tmp_path: Path) -> None:
         metrics_workbook=met,
     )
     assert trends.discover_eoy_snapshot_years(snapshots_dir) == ["SY23-24", "SY24-25"]
+
+
+def test_main_cross_year_renders_report(tmp_path: Path) -> None:
+    output_dir = tmp_path / "trends"
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY24-25_EOY_vs_SY25-26_EOY",
+        summary={
+            "current_school_year": "SY25-26",
+            "baseline_school_year": "SY24-25",
+            "baseline_period": "EOY",
+            "current_period": "EOY",
+            "movement_count": 3,
+            "regression_count": 1,
+            "movements_by_type": {},
+        },
+        movements=[],
+        regressions=[],
+    )
+    report_path = output_dir / "cross_year" / "index.html"
+    code = trends.main_cross_year(
+        [
+            "--no-fetch",
+            "--output-dir",
+            str(output_dir),
+            "--snapshots-dir",
+            str(tmp_path / "snapshots"),
+        ]
+    )
+    assert code == 0
+    assert report_path.is_file()
+    assert "School Year trends" in report_path.read_text(encoding="utf-8")
+
+
+def test_example_cli_trend_eoy_alias(tmp_path: Path, monkeypatch) -> None:
+    import example_cli
+
+    output_dir = tmp_path / "trends"
+    _write_cross_year_pair(
+        output_dir,
+        pair_name="SY24-25_EOY_vs_SY25-26_EOY",
+        summary={
+            "current_school_year": "SY25-26",
+            "baseline_school_year": "SY24-25",
+            "baseline_period": "EOY",
+            "current_period": "EOY",
+            "movement_count": 3,
+            "regression_count": 1,
+            "movements_by_type": {},
+        },
+        movements=[],
+        regressions=[],
+    )
+    monkeypatch.setenv("TREND_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("TREND_SNAPSHOTS_DIR", str(tmp_path / "snapshots"))
+    code = example_cli.run_trend(["eoy", "--no-fetch"])
+    assert code == 0
+    assert (output_dir / "cross_year" / "index.html").is_file()
+
+
+def test_run_cross_year_pipeline_refreshes_then_compares(tmp_path: Path, monkeypatch) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    output_dir = tmp_path / "trends"
+    calls: list[str] = []
+
+    def fake_run_trend_school_year(school_year: str, **kwargs: object) -> tuple[int, str]:
+        calls.append(school_year)
+        return 0, "snapshotted"
+
+    def fake_run_cross_year_compares(school_years: list[str], **kwargs: object) -> int:
+        calls.append("compare:" + ",".join(school_years))
+        _write_cross_year_pair(
+            output_dir,
+            pair_name="SY24-25_EOY_vs_SY25-26_EOY",
+            summary={
+                "current_school_year": "SY25-26",
+                "baseline_school_year": "SY24-25",
+                "baseline_period": "EOY",
+                "current_period": "EOY",
+                "movement_count": 1,
+                "regression_count": 0,
+                "movements_by_type": {},
+            },
+            movements=[],
+            regressions=[],
+        )
+        return trends.render_cross_year_report(
+            output_dir=output_dir,
+            snapshots_dir=snapshots_dir,
+        )
+
+    monkeypatch.setattr(trends, "discover_school_years", lambda **kwargs: ["SY24-25", "SY25-26"])
+    monkeypatch.setattr(trends, "run_trend_school_year", fake_run_trend_school_year)
+    monkeypatch.setattr(trends, "run_cross_year_compares", fake_run_cross_year_compares)
+
+    code = trends.run_cross_year_pipeline(
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        inputs_dir=tmp_path / "inputs",
+        qpr_dir=tmp_path / "qpr",
+        force_fetch=True,
+    )
+    assert code == 0
+    assert calls == ["SY24-25", "SY25-26", "compare:SY24-25,SY25-26"]
+    assert (output_dir / "cross_year" / "index.html").is_file()
+
+
+def test_render_cross_year_html_notes_missing_goal_achievement_audit(
+    tmp_path: Path,
+) -> None:
+    import visualize
+
+    gar_dir = tmp_path / "goal_achievement"
+    gar_dir.mkdir()
+    aggregates = {
+        "eoy_categories": ["SY24-25", "SY25-26"],
+        "exception_count_series": [100, None],
+        "rows_evaluated_series": [2000, 3000],
+        "schools_with_exceptions_series": [10, None],
+        "issue_code_series": {},
+        "global_series": {},
+        "school_leaderboard": [],
+        "eoy_exception_summary": [
+            {
+                "school_year": "SY24-25",
+                "exceptions": 100,
+                "exception_delta": None,
+                "rows_evaluated": 2000,
+                "schools_with_exceptions": 10,
+            },
+            {
+                "school_year": "SY25-26",
+                "exceptions": None,
+                "exception_delta": None,
+                "rows_evaluated": 3000,
+                "schools_with_exceptions": None,
+            },
+        ],
+        "transitions": [],
+        "missing_goal_achievement_years": ["SY25-26"],
+        "goal_achievement_audit_dir": str(gar_dir),
+        "goal_on_track_series": [],
+        "goal_off_track_series": [],
+    }
+    report_path = tmp_path / "index.html"
+    visualize.render_cross_year_html(aggregates, report_path)
+    html = report_path.read_text(encoding="utf-8")
+    assert "Missing Goal Achievement audit CSV" in html
+    assert "SY25-26" in html
+    assert "{school_year}_GoalAchievement_AUDIT.csv" in html

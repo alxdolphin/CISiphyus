@@ -198,6 +198,7 @@ def pull_school_year_backfill(
     *,
     inputs_dir: Path,
     force_fetch: bool,
+    include_accreditation: bool | None = None,
 ) -> int:
     cached = school_year_metrics_cached(school_year, inputs_dir=inputs_dir)
     if cached is not None and not force_fetch:
@@ -213,8 +214,10 @@ def pull_school_year_backfill(
             acc_path, met_path = pull_workbooks(
                 school_year=school_year,
                 force_fetch=True,
+                include_accreditation=include_accreditation,
             )
-            shutil.copy2(acc_path, dest_dir / "accreditation.xlsx")
+            if acc_path is not None:
+                shutil.copy2(acc_path, dest_dir / "accreditation.xlsx")
             shutil.copy2(met_path, metrics_dest)
         else:
             print(
@@ -259,6 +262,7 @@ def run_eoy_backfill_and_snapshot(
     snapshots_dir: Path,
     force_fetch: bool,
     force: bool,
+    include_accreditation: bool | None = None,
 ) -> tuple[int, str]:
     cached = school_year_metrics_cached(school_year, inputs_dir=inputs_dir)
     slot = snapshot_slot(snapshots_dir, school_year, FALLBACK_PERIOD)
@@ -267,6 +271,7 @@ def run_eoy_backfill_and_snapshot(
             school_year,
             inputs_dir=inputs_dir,
             force_fetch=force_fetch,
+            include_accreditation=include_accreditation,
         )
         if code != 0:
             return 1, "failed"
@@ -345,13 +350,13 @@ def resolve_period_workbooks(
     period: str,
     *,
     inputs_dir: Path,
-) -> tuple[Path, Path] | None:
+) -> tuple[Path | None, Path] | None:
     period_dir = inputs_dir / school_year / period
     if not period_dir.is_dir():
         return None
     acc = _find_workbook(period_dir, ACCREDITATION_CANDIDATES, ("*accreditation*.xlsx",))
     met = _find_workbook(period_dir, (), METRICS_GLOBS)
-    if acc is None or met is None:
+    if met is None:
         return None
     return acc, met
 
@@ -359,30 +364,52 @@ def resolve_period_workbooks(
 def archive_workbooks(
     school_year: str,
     period: str,
-    acc_wb: Path,
+    acc_wb: Path | None,
     met_wb: Path,
     *,
     inputs_dir: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path | None, Path]:
     dest_dir = inputs_dir / school_year / period
     dest_dir.mkdir(parents=True, exist_ok=True)
-    acc_dest = dest_dir / acc_wb.name
     met_dest = dest_dir / met_wb.name
-    shutil.copy2(acc_wb, acc_dest)
     shutil.copy2(met_wb, met_dest)
+    if acc_wb is None:
+        return None, met_dest.resolve()
+    acc_dest = dest_dir / acc_wb.name
+    shutil.copy2(acc_wb, acc_dest)
     return acc_dest.resolve(), met_dest.resolve()
 
 
-def pull_workbooks(*, school_year: str, force_fetch: bool) -> tuple[Path, Path]:
-    print(
-        f"[trend] pulling accreditation and student metrics from CISDM ({school_year})",
-        file=sys.stderr,
-    )
+def accreditation_fetch_requested(*, explicit: bool | None = None) -> bool:
+    if explicit is not None:
+        return explicit
+    return accreditation._flag_true(os.environ.get("ACCREDITATION_FETCH_FROM_CISDM"))
+
+
+def pull_workbooks(
+    *,
+    school_year: str,
+    force_fetch: bool,
+    include_accreditation: bool | None = None,
+) -> tuple[Path | None, Path]:
+    include_accreditation = accreditation_fetch_requested(explicit=include_accreditation)
+    if include_accreditation:
+        print(
+            f"[trend] pulling accreditation and student metrics from CISDM ({school_year})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[trend] pulling student metrics from CISDM ({school_year}); "
+            "skip accreditation (ACCREDITATION_FETCH_FROM_CISDM=1 or --accreditation)",
+            file=sys.stderr,
+        )
     return _resolve_workbooks(
         accreditation_workbook=None,
         metrics_workbook=None,
         school_year=school_year,
         force_fetch=force_fetch,
+        include_accreditation=include_accreditation,
     )
 
 
@@ -391,10 +418,10 @@ def workbooks_for_period(
     period: str,
     *,
     inputs_dir: Path,
-    pulled: tuple[Path, Path] | None,
+    pulled: tuple[Path | None, Path] | None,
     latest_pull_period: str | None,
     force_fetch: bool,
-) -> tuple[Path, Path] | None:
+) -> tuple[Path | None, Path] | None:
     cached = resolve_period_workbooks(school_year, period, inputs_dir=inputs_dir)
     if cached and not force_fetch:
         return cached
@@ -421,6 +448,7 @@ def run_trend_school_year(
     skip_compare: bool = False,
     regression_threshold: float = 0.01,
     skip_empty_periods: bool = False,
+    include_accreditation: bool | None = None,
 ) -> tuple[int, str]:
     manifest = load_manifest(snapshots_dir)
     snapshotted = {
@@ -457,6 +485,7 @@ def run_trend_school_year(
             snapshots_dir=snapshots_dir,
             force_fetch=force_fetch,
             force=force,
+            include_accreditation=include_accreditation,
         )
 
     need_capture = [
@@ -465,7 +494,7 @@ def run_trend_school_year(
         if period not in snapshotted or force
     ]
     latest_pull_period: str | None = None
-    pulled: tuple[Path, Path] | None = None
+    pulled: tuple[Path | None, Path] | None = None
     if need_capture:
         missing_cache = [
             period
@@ -478,6 +507,7 @@ def run_trend_school_year(
                 pulled = pull_workbooks(
                     school_year=school_year,
                     force_fetch=force_fetch or bool(missing_cache),
+                    include_accreditation=include_accreditation,
                 )
             except (FileNotFoundError, OSError, RuntimeError) as exc:
                 print(f"error: CISDM pull failed: {exc}", file=sys.stderr)
@@ -522,6 +552,7 @@ def run_trend_school_year(
                 metrics_workbook=met_wb,
                 force_fetch=False,
                 force=force,
+                metrics_only=acc_wb is None,
             )
         except (FileExistsError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
             print(f"error: {school_year}/{period}: {exc}", file=sys.stderr)
@@ -646,13 +677,18 @@ def _resolve_workbooks(
     metrics_workbook: Path | None,
     school_year: str | None = None,
     force_fetch: bool,
-) -> tuple[Path, Path]:
-    if accreditation_workbook and metrics_workbook:
-        return accreditation_workbook.resolve(), metrics_workbook.resolve()
+    include_accreditation: bool = True,
+) -> tuple[Path | None, Path]:
+    if metrics_workbook is not None:
+        met_path = metrics_workbook.resolve()
+        if accreditation_workbook is not None:
+            return accreditation_workbook.resolve(), met_path
+        if not include_accreditation:
+            return None, met_path
 
     acc_path = accreditation_workbook
     met_path = metrics_workbook
-    if acc_path is None:
+    if include_accreditation and acc_path is None:
         destination = accreditation.preferred_accreditation_workbook()
         fetch = accreditation.fetch_accreditation_workbook(
             destination=destination,
@@ -673,7 +709,10 @@ def _resolve_workbooks(
         if not fetch.succeeded:
             raise FileNotFoundError(f"student metrics workbook unavailable at {destination}")
         met_path = fetch.destination
-    return acc_path.resolve(), met_path.resolve()
+    return (
+        acc_path.resolve() if acc_path is not None else None,
+        met_path.resolve(),
+    )
 
 
 def load_manifest(snapshots_dir: Path) -> dict[str, Any]:
@@ -1441,14 +1480,116 @@ def run_cross_year_compares(
         print(f"compare cross-year: {prior_sy}/{FALLBACK_PERIOD} -> {curr_sy}/{curr_period}")
         print(f"  movements: {payload['movement_count']}")
         print(f"  output: {pair_dir}")
-    from visualize import build_cross_year_aggregates, load_cross_year_summaries, render_cross_year_html
+    from visualize import load_cross_year_summaries
 
     if load_cross_year_summaries(output_dir):
-        aggregates = build_cross_year_aggregates(output_dir, snapshots_dir=snapshots_dir)
-        report_path = output_dir / "cross_year" / "index.html"
-        render_cross_year_html(aggregates, report_path)
-        print(f"cross-year report: {report_path}")
+        report_code = render_cross_year_report(
+            output_dir=output_dir,
+            snapshots_dir=snapshots_dir,
+        )
+        if report_code != 0:
+            return report_code
     return exit_code
+
+
+def run_cross_year_pipeline(
+    *,
+    snapshots_dir: Path | None = None,
+    output_dir: Path | None = None,
+    inputs_dir: Path | None = None,
+    qpr_dir: Path | None = None,
+    goal_achievement_audit_dir: Path | None = None,
+    regression_threshold: float = 0.01,
+    force_fetch: bool = True,
+    force: bool = False,
+    include_accreditation: bool | None = None,
+) -> int:
+    """Pull fresh CISDM exports, refresh EOY snapshots, compare, and render HTML."""
+    snapshots_dir = snapshots_dir or default_snapshots_dir()
+    output_dir = output_dir or default_output_dir()
+    inputs_dir = inputs_dir or default_inputs_dir()
+    qpr_dir = qpr_dir or default_qpr_dir()
+
+    school_years = discover_school_years(
+        qpr_dir=qpr_dir,
+        snapshots_dir=snapshots_dir,
+        inputs_dir=inputs_dir,
+        include_config_years=True,
+    )
+    if not school_years:
+        print("error: no school years found for cross-year trends", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    for school_year in school_years:
+        print(f"=== {school_year} ===", file=sys.stderr)
+        code, status = run_trend_school_year(
+            school_year,
+            snapshots_dir=snapshots_dir,
+            output_dir=output_dir,
+            inputs_dir=inputs_dir,
+            qpr_dir=qpr_dir,
+            force=force or force_fetch,
+            force_fetch=force_fetch,
+            skip_compare=True,
+            skip_empty_periods=True,
+            include_accreditation=include_accreditation,
+        )
+        print(f"status {school_year}: {status}", file=sys.stderr)
+        if code != 0:
+            exit_code = code
+
+    cross_code = run_cross_year_compares(
+        school_years,
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        regression_threshold=regression_threshold,
+    )
+    if cross_code != 0:
+        return cross_code
+    if exit_code != 0:
+        return exit_code
+
+    from visualize import load_cross_year_summaries
+
+    if load_cross_year_summaries(output_dir):
+        return 0
+    return render_cross_year_report(
+        output_dir=output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=goal_achievement_audit_dir,
+    )
+
+
+def render_cross_year_report(
+    *,
+    output_dir: Path | None = None,
+    snapshots_dir: Path | None = None,
+    goal_achievement_audit_dir: Path | None = None,
+) -> int:
+    output_dir = output_dir or default_output_dir()
+    snapshots_dir = snapshots_dir or default_snapshots_dir()
+    from visualize import build_cross_year_aggregates, load_cross_year_summaries, render_cross_year_html
+
+    if not load_cross_year_summaries(output_dir):
+        print(
+            "error: no cross-year compare data under "
+            f"{output_dir / 'cross_year'} — run cisiphyus trend --all first",
+            file=sys.stderr,
+        )
+        return 1
+    aggregates = build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=goal_achievement_audit_dir,
+    )
+    report_path = output_dir / "cross_year" / "index.html"
+    render_cross_year_html(aggregates, report_path)
+    print(f"cross-year report: {report_path}")
+    return 0
+
+
+CROSS_YEAR_REPORT_ALIASES = frozenset({"cross-year", "eoy", "cross-year-report"})
 
 
 def _write_movements_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -1512,10 +1653,10 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
             f"- **Current:** {payload.get('current_period', '')}",
             f"- **Compared at:** {payload.get('compared_at', '')}",
             "",
-            "## Student Metrics Summary data quality",
+            "## Student Metrics summary totals",
             "",
-            f"- Changed issue counts: **{payload.get('movement_count', 0)}**",
-            f"- Issue counts increased: **{payload.get('regression_count', 0)}**",
+            f"- Summary totals changed: **{payload.get('movement_count', 0)}**",
+            f"- Totals that went up: **{payload.get('regression_count', 0)}**",
             "",
         ]
     )
@@ -1525,15 +1666,15 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
         row_level = goal_progress.get("row_level") or {}
         lines.extend(
             [
-                "## Goal progress",
+                "## Student goal progress",
                 "",
-                f"- Goal–Metric rows with Baseline and Target (baseline EOY): **{baseline.get('eligible_rows', 0)}**",
-                f"- Goal–Metric rows with Baseline and Target (current EOY): **{current.get('eligible_rows', 0)}**",
-                f"- % meets Target (baseline EOY): **{baseline.get('on_track_pct', 'n/a')}**",
-                f"- % meets Target (current EOY): **{current.get('on_track_pct', 'n/a')}**",
+                f"- Tracked goals (baseline EOY): **{baseline.get('eligible_rows', 0)}**",
+                f"- Tracked goals (current EOY): **{current.get('eligible_rows', 0)}**",
+                f"- On track (baseline EOY): **{baseline.get('on_track_pct', 'n/a')}%**",
+                f"- On track (current EOY): **{current.get('on_track_pct', 'n/a')}%**",
                 f"- Goal progress movements: **{goal_progress.get('movement_count', 0)}**",
-                f"- Goal–Metric rows improved: **{row_level.get('improved', 0)}**",
-                f"- Goal–Metric rows worsened: **{row_level.get('worsened', 0)}**",
+                f"- Goals improved: **{row_level.get('improved', 0)}**",
+                f"- Goals fell behind: **{row_level.get('worsened', 0)}**",
                 "",
             ]
         )
@@ -1606,6 +1747,7 @@ def _cmd_trend(args: argparse.Namespace) -> int:
         return 1
 
     exit_code = 0
+    include_accreditation = _accreditation_cli_flag(args)
     for school_year in unique_years:
         print(f"=== {school_year} ===")
         code, status = run_trend_school_year(
@@ -1619,6 +1761,7 @@ def _cmd_trend(args: argparse.Namespace) -> int:
             skip_compare=args.skip_compare,
             regression_threshold=args.regression_threshold,
             skip_empty_periods=args.all,
+            include_accreditation=include_accreditation,
         )
         print(f"status {school_year}: {status}", file=sys.stderr)
         if code != 0:
@@ -1675,7 +1818,86 @@ def _build_trend_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
         default=0.01,
         help="Minimum pct drop to flag accreditation metric regression (default 0.01).",
     )
+    parser.add_argument(
+        "--accreditation",
+        action="store_true",
+        help="Pull and snapshot accreditation (default: only when ACCREDITATION_FETCH_FROM_CISDM=1).",
+    )
     return parser
+
+
+def _accreditation_cli_flag(args: argparse.Namespace) -> bool | None:
+    return True if args.accreditation else None
+
+
+def _build_cross_year_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Refresh EOY snapshots from CISDM, run cross-year compares, and write the HTML report."
+        ),
+        prog=prog,
+    )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Skip CISDM pull and re-compare; only regenerate HTML from existing artifacts.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-capture snapshots even when period directories already exist.",
+    )
+    parser.add_argument(
+        "--regression-threshold",
+        type=float,
+        default=0.01,
+        help="Minimum pct drop to flag accreditation metric regression (default 0.01).",
+    )
+    parser.add_argument(
+        "--snapshots-dir",
+        type=Path,
+        default=None,
+        help="Snapshot root (default: TREND_SNAPSHOTS_DIR or artifacts/snapshots/).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Trend output root (default: TREND_OUTPUT_DIR or artifacts/trends/).",
+    )
+    parser.add_argument(
+        "--goal-achievement-audit-dir",
+        type=Path,
+        default=None,
+        help="Goal Achievement audit CSV directory (default: GOAL_ACHIEVEMENT_AUDIT_DIR or evaluation path).",
+    )
+    parser.add_argument(
+        "--accreditation",
+        action="store_true",
+        help="Pull and snapshot accreditation (default: only when ACCREDITATION_FETCH_FROM_CISDM=1).",
+    )
+    return parser
+
+
+def main_cross_year(argv: list[str] | None = None) -> int:
+    args = _build_cross_year_parser(prog="cisiphyus trend cross-year").parse_args(argv)
+    if args.no_fetch:
+        return render_cross_year_report(
+            output_dir=args.output_dir,
+            snapshots_dir=args.snapshots_dir,
+            goal_achievement_audit_dir=args.goal_achievement_audit_dir,
+        )
+    return run_cross_year_pipeline(
+        output_dir=args.output_dir,
+        snapshots_dir=args.snapshots_dir,
+        inputs_dir=None,
+        qpr_dir=None,
+        goal_achievement_audit_dir=args.goal_achievement_audit_dir,
+        regression_threshold=args.regression_threshold,
+        force_fetch=True,
+        force=args.force,
+        include_accreditation=_accreditation_cli_flag(args),
+    )
 
 
 def main_trend(argv: list[str] | None = None) -> int:

@@ -13,13 +13,17 @@ targets:
 """
 
 TREND_USAGE = """usage: cisiphyus trend <school-year> [school-year ...] [options]
+       cisiphyus trend cross-year [options]
 
 Discover available reporting periods, capture snapshots, and compare consecutive quarters.
+Regenerate the cross-year EOY HTML report with `cross-year` (alias: `eoy`).
 
 examples:
   cisiphyus trend SY25-26
   cisiphyus trend SY25-26 SY24-25
   cisiphyus trend --all
+  cisiphyus trend cross-year
+  cisiphyus trend eoy
 """
 
 
@@ -99,6 +103,8 @@ def run_trend(argv: list[str]) -> int:
     if str(example_dir) not in sys.path:
         sys.path.insert(0, str(example_dir))
     trends = __import__("trends")
+    if argv[0] in trends.CROSS_YEAR_REPORT_ALIASES:
+        return int(trends.main_cross_year(argv[1:]))
     return int(trends.main_trend(argv))
 
 
