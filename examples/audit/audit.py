@@ -768,11 +768,15 @@ FLAG_DESCRIPTIONS: dict[str, str] = {
     "target_without_baseline": "Target set without baseline",
     "baseline_without_target": "Baseline set without target",
     "baseline_without_target_non_goal_context": "Baseline without target in non-goal context",
-    "baseline_without_target_no_goal_context": "Baseline without target with no goal context",
+    "baseline_without_target_no_goal_context": (
+        "Baseline without target (no goal context — accepted)"
+    ),
     "duplicate_composite_key": "Duplicate Student ID+School+Goal+Metric row",
     "student_client_id_mismatch": "Student ID maps to multiple Client IDs",
     "case_manager_blank": "Case Manager is blank",
 }
+
+ACCEPTED_ISSUE_CODES = frozenset({"baseline_without_target_no_goal_context"})
 
 
 @dataclass
@@ -967,6 +971,25 @@ class IssueSink:
             self.add(row_num, code)
 
 
+class AcceptedSink:
+    def __init__(
+        self,
+        *,
+        accepted_codes: Counter[str],
+        detail_map: dict[int, list[str]],
+    ) -> None:
+        self._accepted_codes = accepted_codes
+        self._detail_map = detail_map
+
+    def add(self, row_num: int, code: str) -> None:
+        self._accepted_codes[code] += 1
+        self._detail_map[row_num].append(code)
+
+    def add_many(self, row_num: int, codes: list[str]) -> None:
+        for code in codes:
+            self.add(row_num, code)
+
+
 def audit_composite_keys(records: list[RowRecord]) -> dict[str, Any]:
     seen: dict[tuple[str, str, str, str, str], int] = {}
     duplicates: list[int] = []
@@ -1044,10 +1067,12 @@ def _audit_baseline_target_flags(
     *,
     complete_metric_contexts: set[tuple[str, str]],
     sink: IssueSink,
+    accepted_sink: AcceptedSink,
 ) -> None:
     for record in records:
         status = baseline_target_status(record)
         flags: list[str] = []
+        accepted_flags: list[str] = []
         if status == "both_blank":
             flags.append("both_baseline_and_target_blank")
             if grading_period_count(record) >= 2:
@@ -1055,13 +1080,16 @@ def _audit_baseline_target_flags(
         elif status == "target_only":
             flags.append("target_without_baseline")
         elif status == "baseline_only":
-            flags.append("baseline_without_target")
             context = student_metric_context(record)
             if context[0] and context in complete_metric_contexts:
+                flags.append("baseline_without_target")
                 flags.append("baseline_without_target_non_goal_context")
             else:
-                flags.append("baseline_without_target_no_goal_context")
-        sink.add_many(row_number(record), flags)
+                accepted_flags.append("baseline_without_target_no_goal_context")
+        if flags:
+            sink.add_many(row_number(record), flags)
+        if accepted_flags:
+            accepted_sink.add_many(row_number(record), accepted_flags)
 
 
 def _audit_domain_scale_checks(records: list[RowRecord], sink: IssueSink) -> None:
@@ -1072,11 +1100,29 @@ def _audit_domain_scale_checks(records: list[RowRecord], sink: IssueSink) -> Non
             sink.add_many(row_number(record), codes)
 
 
+def _build_detail_rows(
+    records: list[RowRecord],
+    detail_map: dict[int, list[str]],
+) -> list[dict[str, Any]]:
+    row_index = {row_number(r): r for r in records}
+    return [
+        _detail_row(row_index[rn], sorted(set(codes)))
+        for rn, codes in sorted(detail_map.items())
+        if rn in row_index
+    ]
+
+
 def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     summary: Counter[str] = Counter()
     issue_codes: Counter[str] = Counter()
     detail_map: dict[int, list[str]] = defaultdict(list)
+    accepted_codes: Counter[str] = Counter()
+    accepted_detail_map: dict[int, list[str]] = defaultdict(list)
     sink = IssueSink(issue_codes=issue_codes, detail_map=detail_map)
+    accepted_sink = AcceptedSink(
+        accepted_codes=accepted_codes,
+        detail_map=accepted_detail_map,
+    )
 
     key_info = audit_composite_keys(records)
     client_info = audit_student_client_ids(records)
@@ -1100,15 +1146,13 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
         records,
         complete_metric_contexts=complete_metric_contexts,
         sink=sink,
+        accepted_sink=accepted_sink,
     )
     _audit_domain_scale_checks(records, sink)
 
-    row_index = {row_number(r): r for r in records}
-    detail_rows = [
-        _detail_row(row_index[rn], sorted(set(codes)))
-        for rn, codes in sorted(detail_map.items())
-        if rn in row_index
-    ]
+    detail_rows = _build_detail_rows(records, detail_map)
+    accepted_detail_rows = _build_detail_rows(records, accepted_detail_map)
+    summary["accepted_exception_rows"] = len(accepted_detail_rows)
 
     return {
         "composite_key_audit": key_info,
@@ -1116,7 +1160,9 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
         "baseline_target_distribution": bt,
         "summary": dict(summary),
         "issue_code_counts": dict(issue_codes),
+        "accepted_exception_counts": dict(accepted_codes),
         "detail_rows": detail_rows,
+        "accepted_detail_rows": accepted_detail_rows,
     }
 
 
@@ -1162,7 +1208,9 @@ def _format_issue_counts(counts: dict[str, int]) -> list[str]:
 
 def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
     counts = payload.get("issue_code_counts") or {}
+    accepted_counts = payload.get("accepted_exception_counts") or {}
     summary = payload.get("summary") or {}
+    accepted_row_count = len(payload.get("accepted_detail_rows") or [])
     lines = [
         "# Student Metrics Audit Summary",
         "",
@@ -1174,12 +1222,16 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         f"- Rows evaluated: **{summary.get('rows', 0)}**",
         f"- Rows flagged: **{len(payload.get('detail_rows') or [])}**",
+        f"- Accepted exceptions: **{accepted_row_count}**",
         f"- Duplicate composite keys: **{summary.get('duplicate_composite_keys', 0)}**",
         f"- Student/client ID conflicts: **{summary.get('student_client_id_conflicts', 0)}**",
         "",
-        "## Issue codes",
-        "",
     ]
+    if accepted_counts:
+        lines.extend(["## Accepted exceptions", ""])
+        lines.extend(_format_issue_counts(accepted_counts))
+        lines.append("")
+    lines.extend(["## Issue codes", ""])
     if counts:
         lines.extend(_format_issue_counts(counts))
     else:
@@ -1195,10 +1247,13 @@ def results_to_json_payload(results: dict[str, Any], *, workbook: str, sheet: st
         "run_at": datetime.now(timezone.utc).isoformat(),
         "summary": results.get("summary", {}),
         "issue_code_counts": results.get("issue_code_counts", {}),
+        "accepted_exception_counts": results.get("accepted_exception_counts", {}),
+        "accepted_detail_rows": results.get("accepted_detail_rows") or [],
         "baseline_target_distribution": results.get("baseline_target_distribution", {}),
         "composite_key_audit": results.get("composite_key_audit", {}),
         "student_client_audit": results.get("student_client_audit", {}),
         "detail_row_count": len(results.get("detail_rows") or []),
+        "accepted_detail_row_count": len(results.get("accepted_detail_rows") or []),
     }
 
 
@@ -1215,7 +1270,14 @@ def export_results(results: dict[str, Any], output_dir: Path, *, workbook: str, 
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    write_summary_markdown(paths["audit_summary_md"], {**payload, "detail_rows": results.get("detail_rows")})
+    write_summary_markdown(
+        paths["audit_summary_md"],
+        {
+            **payload,
+            "detail_rows": results.get("detail_rows"),
+            "accepted_detail_rows": results.get("accepted_detail_rows"),
+        },
+    )
     return {key: str(path) for key, path in paths.items()}
 
 

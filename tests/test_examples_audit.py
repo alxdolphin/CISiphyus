@@ -71,10 +71,58 @@ def test_fixture_flags_structural_issues(tmp_path: Path) -> None:
     assert counts.get("both_baseline_and_target_blank", 0) >= 1
     assert counts.get("both_blank_with_two_progress_reports", 0) >= 1
     assert counts.get("target_without_baseline", 0) >= 1
-    assert counts.get("baseline_without_target", 0) >= 2
+    assert counts.get("baseline_without_target", 0) >= 1
+    assert counts.get("baseline_without_target_non_goal_context", 0) >= 1
+    assert "baseline_without_target_no_goal_context" not in counts
     assert counts.get("duplicate_composite_key", 0) >= 1
     assert counts.get("student_client_id_mismatch", 0) >= 2
     assert counts.get("case_manager_blank", 0) >= 1
+
+
+def test_no_goal_context_is_accepted_not_flagged(tmp_path: Path) -> None:
+    results = _evaluate(_workbook(tmp_path))
+    accepted_counts = results["accepted_exception_counts"]
+    assert accepted_counts.get("baseline_without_target_no_goal_context", 0) == 1
+
+    accepted_rows = {
+        row["student_id"]: row for row in results.get("accepted_detail_rows") or []
+    }
+    assert "S012" in accepted_rows
+    assert (
+        accepted_rows["S012"]["issue_codes"]
+        == "baseline_without_target_no_goal_context"
+    )
+
+    flagged_rows = results.get("detail_rows") or []
+    flagged_ids = {row["student_id"] for row in flagged_rows}
+    assert "S012" not in flagged_ids
+
+    s013_rows = [row for row in flagged_rows if row.get("student_id") == "S013"]
+    assert len(s013_rows) == 1
+    codes = set(s013_rows[0]["issue_codes"].split(";"))
+    assert "baseline_without_target" in codes
+    assert "baseline_without_target_non_goal_context" in codes
+
+
+def test_export_includes_accepted_exceptions_section(tmp_path: Path) -> None:
+    workbook = _workbook(tmp_path)
+    results = _evaluate(workbook)
+    paths = audit.export_results(
+        results,
+        tmp_path / "out",
+        workbook=str(workbook),
+        sheet="Sheet1",
+    )
+    markdown = Path(paths["audit_summary_md"]).read_text(encoding="utf-8")
+    assert "## Accepted exceptions" in markdown
+    assert "baseline_without_target_no_goal_context" in markdown
+
+    payload = json.loads(Path(paths["audit_summary_json"]).read_text(encoding="utf-8"))
+    assert payload["accepted_detail_row_count"] == 1
+    assert payload["accepted_exception_counts"]["baseline_without_target_no_goal_context"] == 1
+
+    flags_csv = Path(paths["audit_flags"]).read_text(encoding="utf-8")
+    assert "S012" not in flags_csv
 
 
 def test_percent_attendance_rejects_days_absent_target() -> None:
