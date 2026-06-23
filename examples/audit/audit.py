@@ -4,11 +4,14 @@ Student metrics audit for CISDM student metrics summary exports.
 
 Run (fetches from CISDM when needed):
   cisiphyus audit metrics
+  cisiphyus audit metrics --year SY24-25
+  cisiphyus audit metrics --year all
 
 Pin a local workbook:
   cisiphyus audit metrics --workbook path/to/StudentMetricsSummary.xlsx
 
-Outputs land in artifacts/audit/ by default.
+Per-year outputs: artifacts/audit/<school-year>/
+`--year all` writes a cumulative comparison to artifacts/audit/.
 """
 
 from __future__ import annotations
@@ -44,6 +47,28 @@ TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 STUDENT_METRICS_MAX_AGE_HOURS = 24.0
 CISIPHYUS_REPORT_ID = "student_metrics_summary"
 DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
+SCHOOL_YEAR_LABEL_RE = re.compile(r"^SY\d{2}-\d{2}$", re.IGNORECASE)
+SCHOOL_YEAR_SHORT_RE = re.compile(r"^SY\d{2}$", re.IGNORECASE)
+ARCHIVE_PERIOD = "EOY"
+METRICS_GLOBS = (
+    "*StudentMetrics*.xlsx",
+    "*student_metrics*.xlsx",
+    "*MetricsSummary*.xlsx",
+    "metrics.xlsx",
+)
+CUMULATIVE_METRIC_ORDER = (
+    "rows_evaluated",
+    "baseline_and_target_present",
+    "baseline_without_target_excl_supplemental",
+    "partial_goal_metrics_flagged",
+    "accepted_domain_tracking",
+    "accepted_supplemental",
+    "accepted_no_abc_goals",
+    "accepted_exceptions_total",
+    "rows_flagged",
+    "direction_mismatches",
+    "scale_mismatches",
+)
 
 
 @dataclass(frozen=True)
@@ -67,9 +92,120 @@ def _default_local_inputs_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "artifacts" / "audit"
 
 
+def default_archives_dir() -> Path:
+    explicit = (os.environ.get("AUDIT_ARCHIVES_DIR") or os.environ.get("TREND_INPUTS_DIR") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return Path(__file__).resolve().parents[2] / "artifacts" / "archives"
+
+
+def _load_config_programs() -> dict[str, int]:
+    src_dir = _default_cisiphyus_root() / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    import config
+
+    return config.load_school_year_programs(config.REPORTS_PATH)
+
+
+def current_school_year() -> str | None:
+    try:
+        programs = _load_config_programs()
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    import config
+
+    return config.default_school_year(programs)
+
+
+def student_metrics_workbook_name(school_year: str) -> str:
+    return f"{school_year}_StudentMetricsSummary.xlsx"
+
+
+def default_student_metrics_filename() -> str:
+    school_year = current_school_year()
+    if school_year:
+        return student_metrics_workbook_name(school_year)
+    return DEFAULT_STUDENT_METRICS_FILENAME
+
+
+def discover_audit_school_years(*, include_config_years: bool = True) -> list[str]:
+    years: set[str] = set()
+    archives_dir = default_archives_dir()
+    if archives_dir.is_dir():
+        for child in archives_dir.iterdir():
+            if child.is_dir() and child.name.upper().startswith("SY"):
+                years.add(child.name)
+    if include_config_years:
+        try:
+            years.update(_load_config_programs().keys())
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+    import config
+
+    return sorted(years, key=config._school_year_sort_key)
+
+
+def normalize_school_year(token: str, known_years: list[str] | None = None) -> str:
+    stripped = token.strip()
+    if not stripped:
+        raise ValueError("school year cannot be empty")
+    upper = stripped.upper()
+    catalog = known_years if known_years is not None else discover_audit_school_years()
+    by_upper = {year.upper(): year for year in catalog}
+    if SCHOOL_YEAR_LABEL_RE.match(upper):
+        if upper in by_upper:
+            return by_upper[upper]
+        return stripped
+    if SCHOOL_YEAR_SHORT_RE.match(upper):
+        matches = [year for year in catalog if year.upper().startswith(f"{upper}-")]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            joined = ", ".join(matches)
+            raise ValueError(f"ambiguous school year {token!r}: {joined}")
+        raise ValueError(f"unknown school year {token!r}")
+    raise ValueError(f"invalid school year {token!r}; expected SY24-25 or SY24")
+
+
+def _find_metrics_workbook(period_dir: Path) -> Path | None:
+    for pattern in METRICS_GLOBS:
+        matches = sorted(period_dir.glob(pattern))
+        if matches:
+            return matches[0].resolve()
+    return None
+
+
+def resolve_archived_metrics_workbook(school_year: str) -> Path | None:
+    archives_dir = default_archives_dir()
+    period_dir = archives_dir / school_year / ARCHIVE_PERIOD
+    if period_dir.is_dir():
+        found = _find_metrics_workbook(period_dir)
+        if found is not None:
+            return found
+    pull_path = (
+        archives_dir
+        / school_year
+        / "pulls"
+        / CISIPHYUS_REPORT_ID
+        / "raw.xlsx"
+    )
+    if pull_path.is_file():
+        return pull_path.resolve()
+    year_dir = archives_dir / school_year
+    if year_dir.is_dir():
+        for child in sorted(year_dir.iterdir()):
+            if child.is_dir():
+                found = _find_metrics_workbook(child)
+                if found is not None:
+                    return found
+    return None
+
+
 def preferred_student_metrics_workbook(
     *,
     local_inputs_dir: Path | None = None,
+    school_year: str | None = None,
 ) -> Path:
     explicit = (os.environ.get("AUDIT_STUDENT_METRICS_WORKBOOK") or "").strip()
     if explicit:
@@ -78,11 +214,46 @@ def preferred_student_metrics_workbook(
         os.environ.get("AUDIT_LOCAL_INPUTS_DIR", "").strip()
         or str(local_inputs_dir or _default_local_inputs_dir())
     ).expanduser().resolve()
-    name = (
-        os.environ.get("AUDIT_STUDENT_METRICS_FILENAME", "").strip()
-        or DEFAULT_STUDENT_METRICS_FILENAME
-    )
+    env_name = os.environ.get("AUDIT_STUDENT_METRICS_FILENAME", "").strip()
+    if env_name:
+        name = env_name
+    elif school_year:
+        name = student_metrics_workbook_name(school_year)
+    else:
+        name = default_student_metrics_filename()
     return (base / name).resolve()
+
+
+def resolve_workbook_for_school_year(
+    school_year: str,
+    *,
+    force_fetch: bool = False,
+    fetch_destination: Path | None = None,
+) -> Path:
+    if not force_fetch:
+        archived = resolve_archived_metrics_workbook(school_year)
+        if archived is not None:
+            print(
+                f"[audit] using archived metrics for {school_year}: {archived}",
+                file=sys.stderr,
+            )
+            return archived
+
+    destination = (
+        fetch_destination
+        or preferred_student_metrics_workbook(school_year=school_year)
+    ).resolve()
+    fetch_result = fetch_student_metrics_workbook(
+        destination=destination,
+        force_fetch=force_fetch,
+        require_fresh=False,
+        school_year=school_year,
+    )
+    if not fetch_result.succeeded and not fetch_result.destination.exists():
+        raise RuntimeError(
+            f"no student metrics workbook for {school_year} at {fetch_result.destination}"
+        )
+    return fetch_result.destination
 
 
 def workbook_freshness(workbook_path: Path | None) -> dict[str, Any]:
@@ -366,6 +537,15 @@ GOAL_DOMAINS: dict[str, str] = {
     "Improve Career Readiness": "Career Readiness",
     "Improve College Readiness": "College Readiness",
     "Improve High Risk Behavior": "High Risk Behavior",
+}
+
+ABC_DOMAINS = frozenset({"Attendance", "Behavior", "Academics"})
+
+# ponytail: canonical ABCS goal metric per domain when export has no ABCS flag
+PRIMARY_GOAL_METRIC_BY_DOMAIN: dict[str, str] = {
+    "Attendance": "Attendance Rate (%)",
+    "Behavior": "Suspensions",
+    "Academics": "GPA",
 }
 
 METRIC_DOMAIN_OVERRIDES: dict[str, frozenset[str]] = {
@@ -767,16 +947,93 @@ FLAG_DESCRIPTIONS: dict[str, str] = {
     "both_blank_with_two_progress_reports": "Both blank but two or more grading periods filled",
     "target_without_baseline": "Target set without baseline",
     "baseline_without_target": "Baseline set without target",
-    "baseline_without_target_non_goal_context": "Baseline without target in non-goal context",
+    "baseline_without_target_non_goal_context": (
+        "Primary goal metric missing target (ABC domain not set up)"
+    ),
     "baseline_without_target_no_goal_context": (
-        "Baseline without target (no goal context — accepted)"
+        "Baseline without target (no ABC goals set yet — accepted)"
+    ),
+    "baseline_without_target_domain_tracking": (
+        "Baseline without target (supplemental metric — domain goal already set)"
+    ),
+    "baseline_without_target_supplemental_metric": (
+        "Baseline without target (supplemental metric — no target required)"
+    ),
+    "target_without_baseline_non_goal_context": (
+        "Primary goal metric missing baseline (ABC domain not set up)"
+    ),
+    "target_without_baseline_no_goal_context": (
+        "Target without baseline (no ABC goals set yet — accepted)"
+    ),
+    "target_without_baseline_domain_tracking": (
+        "Target without baseline (supplemental metric — domain goal already set)"
+    ),
+    "target_without_baseline_supplemental_metric": (
+        "Target without baseline (supplemental metric — no baseline required)"
     ),
     "duplicate_composite_key": "Duplicate Student ID+School+Goal+Metric row",
     "student_client_id_mismatch": "Student ID maps to multiple Client IDs",
     "case_manager_blank": "Case Manager is blank",
 }
 
-ACCEPTED_ISSUE_CODES = frozenset({"baseline_without_target_no_goal_context"})
+ACCEPTED_ISSUE_CODES = frozenset(
+    {
+        "baseline_without_target_no_goal_context",
+        "baseline_without_target_domain_tracking",
+        "baseline_without_target_supplemental_metric",
+        "target_without_baseline_no_goal_context",
+        "target_without_baseline_domain_tracking",
+        "target_without_baseline_supplemental_metric",
+    }
+)
+
+PARTIAL_METRIC_ISSUE_CODES = frozenset(
+    {
+        "baseline_without_target_non_goal_context",
+        "target_without_baseline_non_goal_context",
+    }
+)
+
+BASELINE_SUPPLEMENTAL_ACCEPTED_CODES = frozenset(
+    {
+        "baseline_without_target_domain_tracking",
+        "baseline_without_target_supplemental_metric",
+    }
+)
+
+TARGET_SUPPLEMENTAL_ACCEPTED_CODES = frozenset(
+    {
+        "target_without_baseline_domain_tracking",
+        "target_without_baseline_supplemental_metric",
+    }
+)
+
+NO_GOAL_CONTEXT_ACCEPTED_CODES = frozenset(
+    {
+        "baseline_without_target_no_goal_context",
+        "target_without_baseline_no_goal_context",
+    }
+)
+
+DOMAIN_TRACKING_ACCEPTED_CODES = frozenset(
+    {
+        "baseline_without_target_domain_tracking",
+        "target_without_baseline_domain_tracking",
+    }
+)
+
+SUPPLEMENTAL_ACCEPTED_CODES = frozenset(
+    {
+        "baseline_without_target_supplemental_metric",
+        "target_without_baseline_supplemental_metric",
+    }
+)
+
+ACCEPTED_EXPORT_SPECS: tuple[tuple[str, frozenset[str], str], ...] = (
+    ("accepted_no_goal_context", NO_GOAL_CONTEXT_ACCEPTED_CODES, "accepted_no_goal_context.csv"),
+    ("accepted_domain_tracking", DOMAIN_TRACKING_ACCEPTED_CODES, "accepted_domain_tracking.csv"),
+    ("accepted_supplemental", SUPPLEMENTAL_ACCEPTED_CODES, "accepted_supplemental.csv"),
+)
 
 
 @dataclass
@@ -943,6 +1200,78 @@ def student_metric_context(record: RowRecord) -> tuple[str, str]:
     )
 
 
+def record_abc_domain(record: RowRecord) -> str | None:
+    goal = clean_value(_text(record, "Goal"))
+    if goal is None:
+        return None
+    domain = goal_domain(goal)
+    return domain if domain in ABC_DOMAINS else None
+
+
+def student_domains_with_complete_metric(records: list[RowRecord]) -> set[tuple[str, str, str]]:
+    complete: set[tuple[str, str, str]] = set()
+    for record in records:
+        domain = record_abc_domain(record)
+        if domain is None:
+            continue
+        student_id, school_year = student_metric_context(record)
+        if (
+            student_id
+            and not is_blank(_text(record, "Baseline"))
+            and not is_blank(_text(record, "Target"))
+        ):
+            complete.add((student_id, school_year, domain))
+    return complete
+
+
+def students_with_any_abc_complete(records: list[RowRecord]) -> set[tuple[str, str]]:
+    students: set[tuple[str, str]] = set()
+    for student_id, school_year, _domain in student_domains_with_complete_metric(records):
+        students.add((student_id, school_year))
+    return students
+
+
+def is_primary_goal_metric(record: RowRecord) -> bool:
+    domain = record_abc_domain(record)
+    if domain is None:
+        return False
+    primary = PRIMARY_GOAL_METRIC_BY_DOMAIN.get(domain)
+    metric = clean_value(_text(record, "Metric"))
+    return bool(primary and metric == primary)
+
+
+def _partial_metric_disposition(
+    record: RowRecord,
+    *,
+    status: str,
+    complete_student_contexts: set[tuple[str, str]],
+    complete_domain_contexts: set[tuple[str, str, str]],
+    students_with_abc_complete: set[tuple[str, str]],
+) -> tuple[str | None, str | None]:
+    """Return (issue_code, accepted_code) for baseline_only / target_only rows."""
+    student_id, school_year = student_metric_context(record)
+    domain = record_abc_domain(record)
+    if not student_id:
+        return None, None
+
+    issue_prefix = "baseline_without_target" if status == "baseline_only" else "target_without_baseline"
+
+    if domain is not None:
+        domain_ctx = (student_id, school_year, domain)
+        if domain_ctx in complete_domain_contexts:
+            return None, f"{issue_prefix}_domain_tracking"
+        if (student_id, school_year) not in students_with_abc_complete:
+            return None, f"{issue_prefix}_no_goal_context"
+        if is_primary_goal_metric(record):
+            return f"{issue_prefix}_non_goal_context", None
+        return None, f"{issue_prefix}_supplemental_metric"
+
+    student_ctx = (student_id, school_year)
+    if student_ctx in complete_student_contexts:
+        return f"{issue_prefix}_non_goal_context", None
+    return None, f"{issue_prefix}_no_goal_context"
+
+
 def student_contexts_with_complete_metric(records: list[RowRecord]) -> set[tuple[str, str]]:
     complete: set[tuple[str, str]] = set()
     for record in records:
@@ -1065,7 +1394,9 @@ def _mark_student_client_id_mismatches(
 def _audit_baseline_target_flags(
     records: list[RowRecord],
     *,
-    complete_metric_contexts: set[tuple[str, str]],
+    complete_student_contexts: set[tuple[str, str]],
+    complete_domain_contexts: set[tuple[str, str, str]],
+    students_with_abc_complete: set[tuple[str, str]],
     sink: IssueSink,
     accepted_sink: AcceptedSink,
 ) -> None:
@@ -1077,15 +1408,18 @@ def _audit_baseline_target_flags(
             flags.append("both_baseline_and_target_blank")
             if grading_period_count(record) >= 2:
                 flags.append("both_blank_with_two_progress_reports")
-        elif status == "target_only":
-            flags.append("target_without_baseline")
-        elif status == "baseline_only":
-            context = student_metric_context(record)
-            if context[0] and context in complete_metric_contexts:
-                flags.append("baseline_without_target")
-                flags.append("baseline_without_target_non_goal_context")
-            else:
-                accepted_flags.append("baseline_without_target_no_goal_context")
+        elif status in ("target_only", "baseline_only"):
+            issue_code, accepted_code = _partial_metric_disposition(
+                record,
+                status=status,
+                complete_student_contexts=complete_student_contexts,
+                complete_domain_contexts=complete_domain_contexts,
+                students_with_abc_complete=students_with_abc_complete,
+            )
+            if issue_code:
+                flags.append(issue_code)
+            if accepted_code:
+                accepted_flags.append(accepted_code)
         if flags:
             sink.add_many(row_number(record), flags)
         if accepted_flags:
@@ -1112,6 +1446,198 @@ def _build_detail_rows(
     ]
 
 
+def _partial_metric_contexts(
+    records: list[RowRecord],
+) -> tuple[
+    set[tuple[str, str]],
+    set[tuple[str, str, str]],
+    set[tuple[str, str]],
+]:
+    return (
+        student_contexts_with_complete_metric(records),
+        student_domains_with_complete_metric(records),
+        students_with_any_abc_complete(records),
+    )
+
+
+def _scan_partial_metric_dispositions(
+    records: list[RowRecord],
+) -> tuple[Counter[str], Counter[str]]:
+    """Independent row scan of partial-metric issue and accepted codes."""
+    issue_counts: Counter[str] = Counter()
+    accepted_counts: Counter[str] = Counter()
+    complete_student_contexts, complete_domain_contexts, students_with_abc_complete = (
+        _partial_metric_contexts(records)
+    )
+    for record in records:
+        status = baseline_target_status(record)
+        if status not in {"baseline_only", "target_only"}:
+            continue
+        issue_code, accepted_code = _partial_metric_disposition(
+            record,
+            status=status,
+            complete_student_contexts=complete_student_contexts,
+            complete_domain_contexts=complete_domain_contexts,
+            students_with_abc_complete=students_with_abc_complete,
+        )
+        if issue_code:
+            issue_counts[issue_code] += 1
+        elif accepted_code:
+            accepted_counts[accepted_code] += 1
+        else:
+            issue_counts["__missing_partial_disposition__"] += 1
+    return issue_counts, accepted_counts
+
+
+def _scan_partial_metric_dispositions_for_status(
+    records: list[RowRecord],
+    *,
+    status: str,
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    complete_student_contexts, complete_domain_contexts, students_with_abc_complete = (
+        _partial_metric_contexts(records)
+    )
+    for record in records:
+        if baseline_target_status(record) != status:
+            continue
+        issue_code, accepted_code = _partial_metric_disposition(
+            record,
+            status=status,
+            complete_student_contexts=complete_student_contexts,
+            complete_domain_contexts=complete_domain_contexts,
+            students_with_abc_complete=students_with_abc_complete,
+        )
+        counts[issue_code or accepted_code or "__missing_partial_disposition__"] += 1
+    return counts
+
+
+def reconcile_audit_counts(
+    records: list[RowRecord],
+    results: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    rows = len(records)
+    distribution = results.get("baseline_target_distribution") or {}
+    issue_counts = results.get("issue_code_counts") or {}
+    accepted_counts = results.get("accepted_exception_counts") or {}
+    detail_rows = results.get("detail_rows") or []
+    accepted_detail_rows = results.get("accepted_detail_rows") or []
+
+    if sum(int(distribution.get(key, 0) or 0) for key in distribution) != rows:
+        errors.append(
+            f"baseline_target_distribution sums to {sum(distribution.values())}, expected {rows}"
+        )
+
+    scan_issue, scan_accepted = _scan_partial_metric_dispositions(records)
+    for code in PARTIAL_METRIC_ISSUE_CODES:
+        if scan_issue.get(code, 0) != issue_counts.get(code, 0):
+            errors.append(
+                f"partial issue {code}: scan={scan_issue.get(code, 0)} "
+                f"sink={issue_counts.get(code, 0)}"
+            )
+    for code in ACCEPTED_ISSUE_CODES:
+        if scan_accepted.get(code, 0) != accepted_counts.get(code, 0):
+            errors.append(
+                f"accepted {code}: scan={scan_accepted.get(code, 0)} "
+                f"sink={accepted_counts.get(code, 0)}"
+            )
+    if scan_issue.get("__missing_partial_disposition__", 0):
+        errors.append(
+            "partial-metric rows missing disposition: "
+            f"{scan_issue['__missing_partial_disposition__']}"
+        )
+
+    raw_baseline = int(distribution.get("baseline_without_target", 0) or 0)
+    baseline_scan = _scan_partial_metric_dispositions_for_status(
+        records,
+        status="baseline_only",
+    )
+    if sum(baseline_scan.values()) != raw_baseline:
+        errors.append(
+            f"baseline_only rows: scan={sum(baseline_scan.values())} "
+            f"distribution={raw_baseline}"
+        )
+
+    raw_target = int(distribution.get("target_without_baseline", 0) or 0)
+    target_scan = _scan_partial_metric_dispositions_for_status(
+        records,
+        status="target_only",
+    )
+    if sum(target_scan.values()) != raw_target:
+        errors.append(
+            f"target_only rows: scan={sum(target_scan.values())} "
+            f"distribution={raw_target}"
+        )
+
+    supplemental_excluded = accepted_baseline_supplemental_exclusions(accepted_counts)
+    excl = baseline_without_target_excl_supplemental(distribution, accepted_counts)
+    flagged_baseline = int(issue_counts.get("baseline_without_target_non_goal_context", 0) or 0)
+    no_goal_baseline = int(
+        accepted_counts.get("baseline_without_target_no_goal_context", 0) or 0
+    )
+    if excl != flagged_baseline + no_goal_baseline:
+        errors.append(
+            f"baseline excl supplemental={excl} != flagged={flagged_baseline} "
+            f"+ no_abc_goals={no_goal_baseline}"
+        )
+    if excl + supplemental_excluded != raw_baseline:
+        errors.append(
+            f"baseline partition: excl={excl} + supplemental_excluded="
+            f"{supplemental_excluded} != raw={raw_baseline}"
+        )
+
+    if sum(int(accepted_counts.get(code, 0) or 0) for code in ACCEPTED_ISSUE_CODES) != len(
+        accepted_detail_rows
+    ):
+        errors.append(
+            "accepted code count sum does not match accepted_detail_rows length"
+        )
+
+    partial_counts, data_quality_counts = partition_issue_code_counts(issue_counts)
+    if sum(partial_counts.values()) + sum(data_quality_counts.values()) != sum(
+        issue_counts.values()
+    ):
+        errors.append("issue_code_counts partition does not cover all issue codes")
+
+    partial_row_count = count_rows_with_issue_codes(detail_rows, PARTIAL_METRIC_ISSUE_CODES)
+    if partial_row_count != count_rows_with_issue_codes(
+        detail_rows,
+        frozenset(partial_counts),
+    ):
+        errors.append("partial_metric_issue_counts disagree with detail_rows")
+
+    metrics = year_audit_metrics(results)
+    if metrics["baseline_without_target_excl_supplemental"] != excl:
+        errors.append("year_audit_metrics baseline_without_target_excl_supplemental mismatch")
+    if metrics["partial_goal_metrics_flagged"] != flagged_baseline:
+        errors.append("year_audit_metrics partial_goal_metrics_flagged mismatch")
+    if metrics["accepted_exceptions_total"] != len(accepted_detail_rows):
+        errors.append("year_audit_metrics accepted_exceptions_total mismatch")
+    if metrics["rows_evaluated"] != rows:
+        errors.append("year_audit_metrics rows_evaluated mismatch")
+
+    overlap = {
+        int(row["row_number"])
+        for row in detail_rows
+        if PARTIAL_METRIC_ISSUE_CODES
+        & {code.strip() for code in (row.get("issue_codes") or "").split(";")}
+    } & {int(row["row_number"]) for row in accepted_detail_rows}
+    if overlap:
+        errors.append(f"rows appear in both flagged and accepted sinks: {sorted(overlap)}")
+
+    return {
+        "ok": not errors,
+        "error_count": len(errors),
+        "errors": errors,
+        "baseline_without_target_raw": raw_baseline,
+        "baseline_without_target_excl_supplemental": excl,
+        "baseline_supplemental_excluded": supplemental_excluded,
+        "baseline_flagged_primary": flagged_baseline,
+        "baseline_no_abc_goals": no_goal_baseline,
+    }
+
+
 def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     summary: Counter[str] = Counter()
     issue_codes: Counter[str] = Counter()
@@ -1126,7 +1652,9 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
 
     key_info = audit_composite_keys(records)
     client_info = audit_student_client_ids(records)
-    complete_metric_contexts = student_contexts_with_complete_metric(records)
+    complete_student_contexts = student_contexts_with_complete_metric(records)
+    complete_domain_contexts = student_domains_with_complete_metric(records)
+    students_with_abc_complete = students_with_any_abc_complete(records)
     bt = audit_baseline_target(records)
 
     summary["rows"] = len(records)
@@ -1144,7 +1672,9 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     )
     _audit_baseline_target_flags(
         records,
-        complete_metric_contexts=complete_metric_contexts,
+        complete_student_contexts=complete_student_contexts,
+        complete_domain_contexts=complete_domain_contexts,
+        students_with_abc_complete=students_with_abc_complete,
         sink=sink,
         accepted_sink=accepted_sink,
     )
@@ -1154,7 +1684,7 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     accepted_detail_rows = _build_detail_rows(records, accepted_detail_map)
     summary["accepted_exception_rows"] = len(accepted_detail_rows)
 
-    return {
+    results = {
         "composite_key_audit": key_info,
         "student_client_audit": client_info,
         "baseline_target_distribution": bt,
@@ -1164,6 +1694,8 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
         "detail_rows": detail_rows,
         "accepted_detail_rows": accepted_detail_rows,
     }
+    results["reconciliation"] = reconcile_audit_counts(records, results)
+    return results
 
 
 def _detail_row(record: RowRecord, codes: list[str]) -> dict[str, Any]:
@@ -1179,7 +1711,12 @@ def _detail_row(record: RowRecord, codes: list[str]) -> dict[str, Any]:
     }
 
 
-def write_audit_flags_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_audit_flags_csv(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    include_school_year: bool = False,
+) -> None:
     fieldnames = [
         "row_number",
         "student_id",
@@ -1190,12 +1727,102 @@ def write_audit_flags_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "target",
         "issue_codes",
     ]
+    if include_school_year:
+        fieldnames.insert(0, "school_year")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k) for k in fieldnames})
+
+
+def partition_rows_matching_codes(
+    rows: list[dict[str, Any]],
+    codes: frozenset[str],
+) -> list[dict[str, Any]]:
+    partitioned: list[dict[str, Any]] = []
+    for row in rows:
+        row_codes = {
+            code.strip()
+            for code in (row.get("issue_codes") or "").split(";")
+            if code.strip()
+        }
+        matched = row_codes & codes
+        if matched:
+            partitioned.append({**row, "issue_codes": ";".join(sorted(matched))})
+    return partitioned
+
+
+def partition_flagged_detail_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    partial_rows = partition_rows_matching_codes(rows, PARTIAL_METRIC_ISSUE_CODES)
+    data_quality_rows: list[dict[str, Any]] = []
+    for row in rows:
+        row_codes = {
+            code.strip()
+            for code in (row.get("issue_codes") or "").split(";")
+            if code.strip()
+        }
+        data_quality_codes = row_codes - PARTIAL_METRIC_ISSUE_CODES
+        if data_quality_codes:
+            data_quality_rows.append(
+                {**row, "issue_codes": ";".join(sorted(data_quality_codes))}
+            )
+    return partial_rows, data_quality_rows
+
+
+def partition_accepted_detail_rows(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    buckets = {export_key: [] for export_key, _, _ in ACCEPTED_EXPORT_SPECS}
+    for row in rows:
+        row_codes = {
+            code.strip()
+            for code in (row.get("issue_codes") or "").split(";")
+            if code.strip()
+        }
+        for export_key, codes, _filename in ACCEPTED_EXPORT_SPECS:
+            if row_codes & codes:
+                buckets[export_key].append(row)
+                break
+    return buckets
+
+
+def write_partitioned_audit_exports(
+    output_dir: Path,
+    *,
+    detail_rows: list[dict[str, Any]],
+    accepted_detail_rows: list[dict[str, Any]],
+    include_school_year: bool = False,
+) -> dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    partial_rows, data_quality_rows = partition_flagged_detail_rows(detail_rows)
+    accepted_buckets = partition_accepted_detail_rows(accepted_detail_rows)
+    paths: dict[str, str] = {
+        "audit_flags": str(output_dir / "audit_flags.csv"),
+        "partial_goal_metrics_flags": str(output_dir / "partial_goal_metrics_flags.csv"),
+    }
+    write_audit_flags_csv(
+        Path(paths["audit_flags"]),
+        data_quality_rows,
+        include_school_year=include_school_year,
+    )
+    write_audit_flags_csv(
+        Path(paths["partial_goal_metrics_flags"]),
+        partial_rows,
+        include_school_year=include_school_year,
+    )
+    for export_key, _codes, filename in ACCEPTED_EXPORT_SPECS:
+        path = output_dir / filename
+        paths[export_key] = str(path)
+        write_audit_flags_csv(
+            path,
+            accepted_buckets[export_key],
+            include_school_year=include_school_year,
+        )
+    return paths
 
 
 def _format_issue_counts(counts: dict[str, int]) -> list[str]:
@@ -1206,11 +1833,109 @@ def _format_issue_counts(counts: dict[str, int]) -> list[str]:
     return lines
 
 
+def partition_issue_code_counts(
+    counts: dict[str, int],
+) -> tuple[dict[str, int], dict[str, int]]:
+    partial_metric: dict[str, int] = {}
+    data_quality: dict[str, int] = {}
+    for code, count in counts.items():
+        if code in PARTIAL_METRIC_ISSUE_CODES:
+            partial_metric[code] = count
+        else:
+            data_quality[code] = count
+    return partial_metric, data_quality
+
+
+def count_rows_with_issue_codes(
+    detail_rows: list[dict[str, Any]],
+    codes: frozenset[str],
+) -> int:
+    matched = 0
+    for row in detail_rows:
+        row_codes = {code.strip() for code in (row.get("issue_codes") or "").split(";")}
+        row_codes.discard("")
+        if row_codes & codes:
+            matched += 1
+    return matched
+
+
+def accepted_baseline_supplemental_exclusions(accepted_counts: dict[str, int]) -> int:
+    return sum(
+        int(accepted_counts.get(code, 0) or 0) for code in BASELINE_SUPPLEMENTAL_ACCEPTED_CODES
+    )
+
+
+def baseline_without_target_excl_supplemental(
+    distribution: dict[str, int],
+    accepted_counts: dict[str, int],
+) -> int:
+    raw = int(distribution.get("baseline_without_target", 0) or 0)
+    return raw - accepted_baseline_supplemental_exclusions(accepted_counts)
+
+
+def _format_baseline_without_target_breakdown(
+    *,
+    distribution: dict[str, int],
+    partial_counts: dict[str, int],
+    accepted_counts: dict[str, int],
+) -> str | None:
+    raw = int(distribution.get("baseline_without_target", 0) or 0)
+    if not raw:
+        return None
+    excluded = accepted_baseline_supplemental_exclusions(accepted_counts)
+    total = raw - excluded
+    flagged = int(partial_counts.get("baseline_without_target_non_goal_context", 0) or 0)
+    no_abc_goals = int(accepted_counts.get("baseline_without_target_no_goal_context", 0) or 0)
+    return (
+        f"- Baseline without target (excl. supplemental): **{total}** "
+        f"({flagged} flagged, {no_abc_goals} no ABC goals yet; "
+        f"{excluded} supplemental excluded)"
+    )
+
+
+def _format_partial_metric_breakdown(
+    *,
+    distribution_key: str,
+    distribution: dict[str, int],
+    flagged_counts: dict[str, int],
+    accepted_counts: dict[str, int],
+    flagged_code: str,
+    accepted_code: str,
+    label: str,
+) -> str | None:
+    total = distribution.get(distribution_key, 0)
+    if not total:
+        return None
+    flagged = flagged_counts.get(flagged_code, 0)
+    accepted = accepted_counts.get(accepted_code, 0)
+    return f"- {label}: **{total}** ({flagged} flagged, {accepted} accepted)"
+
+
 def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
     counts = payload.get("issue_code_counts") or {}
+    partial_counts = payload.get("partial_metric_issue_counts")
+    data_quality_counts = payload.get("data_quality_issue_counts")
+    if partial_counts is None or data_quality_counts is None:
+        partial_counts, data_quality_counts = partition_issue_code_counts(counts)
     accepted_counts = payload.get("accepted_exception_counts") or {}
     summary = payload.get("summary") or {}
-    accepted_row_count = len(payload.get("accepted_detail_rows") or [])
+    distribution = payload.get("baseline_target_distribution") or {}
+    detail_rows = payload.get("detail_rows") or []
+    accepted_row_count = payload.get("accepted_detail_row_count")
+    if accepted_row_count is None:
+        accepted_row_count = len(payload.get("accepted_detail_rows") or [])
+    partial_row_count = summary.get("partial_metric_flagged_rows")
+    if partial_row_count is None:
+        partial_row_count = count_rows_with_issue_codes(
+            detail_rows,
+            PARTIAL_METRIC_ISSUE_CODES,
+        )
+    data_quality_row_count = summary.get("data_quality_flagged_rows")
+    if data_quality_row_count is None:
+        data_quality_row_count = count_rows_with_issue_codes(
+            detail_rows,
+            frozenset(data_quality_counts),
+        )
     lines = [
         "# Student Metrics Audit Summary",
         "",
@@ -1221,64 +1946,386 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
         "## Counts",
         "",
         f"- Rows evaluated: **{summary.get('rows', 0)}**",
-        f"- Rows flagged: **{len(payload.get('detail_rows') or [])}**",
+        f"- Rows flagged: **{len(detail_rows)}**",
+        f"- Partial goal metrics (flagged): **{partial_row_count}**",
+        f"- Data quality issues: **{data_quality_row_count}**",
         f"- Accepted exceptions: **{accepted_row_count}**",
         f"- Duplicate composite keys: **{summary.get('duplicate_composite_keys', 0)}**",
         f"- Student/client ID conflicts: **{summary.get('student_client_id_conflicts', 0)}**",
         "",
     ]
+    reconciliation = payload.get("reconciliation") or {}
+    if reconciliation:
+        status = "passed" if reconciliation.get("ok") else "FAILED"
+        lines.append(f"- Reconciliation: **{status}**")
+        lines.append("")
+    for breakdown in (
+        _format_baseline_without_target_breakdown(
+            distribution=distribution,
+            partial_counts=partial_counts,
+            accepted_counts=accepted_counts,
+        ),
+        _format_partial_metric_breakdown(
+            distribution_key="target_without_baseline",
+            distribution=distribution,
+            flagged_counts=partial_counts,
+            accepted_counts=accepted_counts,
+            flagged_code="target_without_baseline_non_goal_context",
+            accepted_code="target_without_baseline_no_goal_context",
+            label="Target without baseline",
+        ),
+    ):
+        if breakdown:
+            lines.append(breakdown)
+    if any(
+        line.startswith("- Baseline without target (excl. supplemental):")
+        or line.startswith("- Target without baseline:")
+        for line in lines
+    ):
+        lines.append("")
     if accepted_counts:
         lines.extend(["## Accepted exceptions", ""])
+        lines.append(
+            "Domain tracking, supplemental metrics, or students with no ABC goal "
+            "metrics set yet. Row-level detail: "
+            "`accepted_no_goal_context.csv`, `accepted_domain_tracking.csv`, "
+            "`accepted_supplemental.csv`."
+        )
+        lines.append("")
         lines.extend(_format_issue_counts(accepted_counts))
         lines.append("")
-    lines.extend(["## Issue codes", ""])
-    if counts:
-        lines.extend(_format_issue_counts(counts))
+    if partial_counts:
+        lines.extend(["## Partial goal metrics", ""])
+        lines.append(
+            "Primary ABCS goal metric missing a target for an ABC domain where the "
+            "student has other ABC domains set up. Row-level detail: "
+            "`partial_goal_metrics_flags.csv`."
+        )
+        lines.append("")
+        lines.extend(_format_issue_counts(partial_counts))
+        lines.append("")
+    lines.extend(["## Data quality issues", ""])
+    if data_quality_counts:
+        lines.append("Row-level detail: `audit_flags.csv`.")
+        lines.append("")
+        lines.extend(_format_issue_counts(data_quality_counts))
     else:
-        lines.append("No issues found.")
+        lines.append("No data quality issues found.")
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def results_to_json_payload(results: dict[str, Any], *, workbook: str, sheet: str) -> dict[str, Any]:
+def _pct(part: int, whole: int) -> str:
+    if whole <= 0:
+        return "0%"
+    return f"{round(100 * part / whole)}%"
+
+
+def year_audit_metrics(results: dict[str, Any]) -> dict[str, Any]:
+    rows = int(results.get("summary", {}).get("rows", 0) or 0)
+    distribution = results.get("baseline_target_distribution") or {}
+    issue_counts = results.get("issue_code_counts") or {}
+    accepted_counts = results.get("accepted_exception_counts") or {}
+    detail_rows = results.get("detail_rows") or []
+    accepted_rows = len(results.get("accepted_detail_rows") or [])
+    partial_counts, data_quality_counts = partition_issue_code_counts(issue_counts)
+    baseline_and_target = int(distribution.get("baseline_and_target_present", 0) or 0)
+    baseline_excl_supplemental = baseline_without_target_excl_supplemental(
+        distribution,
+        accepted_counts,
+    )
+    domain_tracking = int(
+        accepted_counts.get("baseline_without_target_domain_tracking", 0)
+        + accepted_counts.get("target_without_baseline_domain_tracking", 0)
+    )
+    supplemental = int(
+        accepted_counts.get("baseline_without_target_supplemental_metric", 0)
+        + accepted_counts.get("target_without_baseline_supplemental_metric", 0)
+    )
+    no_abc_goals = int(
+        accepted_counts.get("baseline_without_target_no_goal_context", 0)
+        + accepted_counts.get("target_without_baseline_no_goal_context", 0)
+    )
     return {
+        "rows_evaluated": rows,
+        "baseline_and_target_present": baseline_and_target,
+        "baseline_without_target_excl_supplemental": baseline_excl_supplemental,
+        "partial_goal_metrics_flagged": int(
+            issue_counts.get("baseline_without_target_non_goal_context", 0) or 0
+        ),
+        "accepted_domain_tracking": domain_tracking,
+        "accepted_supplemental": supplemental,
+        "accepted_no_abc_goals": no_abc_goals,
+        "accepted_exceptions_total": accepted_rows,
+        "rows_flagged": len(detail_rows),
+        "partial_metric_rows_flagged": count_rows_with_issue_codes(
+            detail_rows,
+            PARTIAL_METRIC_ISSUE_CODES,
+        ),
+        "data_quality_rows_flagged": count_rows_with_issue_codes(
+            detail_rows,
+            frozenset(data_quality_counts),
+        ),
+        "direction_mismatches": int(issue_counts.get("baseline_target_direction_mismatch", 0) or 0),
+        "scale_mismatches": int(issue_counts.get("baseline_scale_mismatch", 0) or 0)
+        + int(issue_counts.get("target_scale_mismatch", 0) or 0),
+        "duplicate_composite_keys": int(results.get("summary", {}).get("duplicate_composite_keys", 0) or 0),
+        "student_client_id_conflicts": int(
+            results.get("summary", {}).get("student_client_id_conflicts", 0) or 0
+        ),
+    }
+
+
+def build_dataset_manifest(
+    *,
+    export_paths: dict[str, str],
+    detail_rows: list[dict[str, Any]],
+    accepted_detail_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    partial_rows, data_quality_rows = partition_flagged_detail_rows(detail_rows)
+    accepted_buckets = partition_accepted_detail_rows(accepted_detail_rows)
+    manifest: dict[str, dict[str, Any]] = {
+        "audit_flags": {
+            "path": Path(export_paths["audit_flags"]).name,
+            "row_count": len(data_quality_rows),
+        },
+        "partial_goal_metrics_flags": {
+            "path": Path(export_paths["partial_goal_metrics_flags"]).name,
+            "row_count": len(partial_rows),
+        },
+    }
+    for export_key, _codes, filename in ACCEPTED_EXPORT_SPECS:
+        manifest[export_key] = {
+            "path": filename,
+            "row_count": len(accepted_buckets[export_key]),
+        }
+    return manifest
+
+
+def build_cumulative_payload(
+    year_runs: list[tuple[str, dict[str, Any], str]],
+) -> dict[str, Any]:
+    school_years = [school_year for school_year, _, _ in year_runs]
+    per_year: dict[str, dict[str, Any]] = {}
+    comparison: dict[str, dict[str, Any]] = {}
+    for school_year, results, workbook in year_runs:
+        metrics = year_audit_metrics(results)
+        per_year[school_year] = {
+            "workbook": workbook,
+            "sheet": results.get("sheet", DEFAULT_SHEET),
+            "metrics": metrics,
+            "reconciliation": results.get("reconciliation") or {},
+            "issue_code_counts": results.get("issue_code_counts") or {},
+            "accepted_exception_counts": results.get("accepted_exception_counts") or {},
+            "baseline_target_distribution": results.get("baseline_target_distribution") or {},
+            "summary": results.get("summary") or {},
+        }
+        for key, value in metrics.items():
+            comparison.setdefault(key, {})[school_year] = value
+
+    return {
+        "cumulative": True,
+        "run_at": datetime.now(timezone.utc).isoformat(),
+        "school_years": school_years,
+        "reconciliation_ok": all(
+            (per_year[school_year].get("reconciliation") or {}).get("ok", False)
+            for school_year in school_years
+        ),
+        "years": per_year,
+        "comparison": comparison,
+    }
+
+
+def _format_cumulative_cell(metric_key: str, value: Any, *, rows: int) -> str:
+    if metric_key in {
+        "baseline_and_target_present",
+        "baseline_without_target_excl_supplemental",
+    } and rows > 0:
+        return f"{value} ({_pct(int(value), rows)})"
+    return str(value)
+
+
+def write_cumulative_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
+    school_years = payload.get("school_years") or []
+    comparison = payload.get("comparison") or {}
+    rows_by_year = {
+        school_year: int((payload.get("years", {}).get(school_year, {}).get("metrics") or {}).get("rows_evaluated", 0))
+        for school_year in school_years
+    }
+    metric_labels = {
+        "rows_evaluated": "Rows evaluated",
+        "baseline_and_target_present": "Baseline + target present",
+        "baseline_without_target_excl_supplemental": (
+            "Baseline without target (excl. supplemental tracking)"
+        ),
+        "partial_goal_metrics_flagged": "Partial goal metrics flagged (primary, domain missing target)",
+        "accepted_domain_tracking": "Accepted: domain tracking metrics",
+        "accepted_supplemental": "Accepted: supplemental metrics",
+        "accepted_no_abc_goals": "Accepted: no ABC goals set yet",
+        "accepted_exceptions_total": "Accepted exception rows (total)",
+        "rows_flagged": "Rows flagged (all issues)",
+        "direction_mismatches": "Direction mismatches",
+        "scale_mismatches": "Scale mismatches",
+    }
+    lines = [
+        "# Student Metrics Audit (cumulative)",
+        "",
+        "Rules: one goal per ABC domain; accept supplemental baseline-only when domain "
+        "has a complete goal metric; flag primary goal metric when domain has no target "
+        "and student has other ABC goals set.",
+        "",
+        f"- **Run at:** {payload.get('run_at', '')}",
+        f"- **School years:** {', '.join(school_years)}",
+        "",
+        "| Metric | " + " | ".join(school_years) + " |",
+        "|---|" + "|".join(["---:"] * len(school_years)) + "|",
+    ]
+    for key in CUMULATIVE_METRIC_ORDER:
+        if key not in comparison:
+            continue
+        label = metric_labels.get(key, key)
+        cells = [
+            _format_cumulative_cell(
+                key,
+                comparison[key].get(school_year, 0),
+                rows=rows_by_year.get(school_year, 0),
+            )
+            for school_year in school_years
+        ]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    reconciliation_ok = payload.get("reconciliation_ok")
+    if reconciliation_ok is not None:
+        lines.extend(
+            [
+                "",
+                f"- **Count reconciliation:** {'passed' if reconciliation_ok else 'FAILED'}",
+            ]
+        )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_cumulative_results(
+    year_runs: list[tuple[str, dict[str, Any], str]],
+    output_dir: Path,
+) -> dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = build_cumulative_payload(year_runs)
+    detail_rows: list[dict[str, Any]] = []
+    accepted_detail_rows: list[dict[str, Any]] = []
+    for school_year, results, _workbook in year_runs:
+        for row in results.get("detail_rows") or []:
+            detail_rows.append({"school_year": school_year, **row})
+        for row in results.get("accepted_detail_rows") or []:
+            accepted_detail_rows.append({"school_year": school_year, **row})
+    export_paths = write_partitioned_audit_exports(
+        output_dir,
+        detail_rows=detail_rows,
+        accepted_detail_rows=accepted_detail_rows,
+        include_school_year=True,
+    )
+    paths = {
+        **export_paths,
+        "audit_summary_json": str(output_dir / "audit_summary.json"),
+        "audit_summary_md": str(output_dir / "audit_summary.md"),
+    }
+    payload["datasets"] = build_dataset_manifest(
+        export_paths=export_paths,
+        detail_rows=detail_rows,
+        accepted_detail_rows=accepted_detail_rows,
+    )
+    Path(paths["audit_summary_json"]).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    write_cumulative_summary_markdown(Path(paths["audit_summary_md"]), payload)
+    return paths
+
+
+def results_to_json_payload(
+    results: dict[str, Any],
+    *,
+    workbook: str,
+    sheet: str,
+    school_year: str | None = None,
+) -> dict[str, Any]:
+    issue_counts = results.get("issue_code_counts", {})
+    partial_counts, data_quality_counts = partition_issue_code_counts(issue_counts)
+    detail_rows = results.get("detail_rows") or []
+    summary = dict(results.get("summary") or {})
+    summary["partial_metric_flagged_rows"] = count_rows_with_issue_codes(
+        detail_rows,
+        PARTIAL_METRIC_ISSUE_CODES,
+    )
+    summary["data_quality_flagged_rows"] = count_rows_with_issue_codes(
+        detail_rows,
+        frozenset(data_quality_counts),
+    )
+    payload = {
         "workbook": workbook,
         "sheet": sheet,
         "run_at": datetime.now(timezone.utc).isoformat(),
-        "summary": results.get("summary", {}),
-        "issue_code_counts": results.get("issue_code_counts", {}),
+        "summary": summary,
+        "issue_code_counts": issue_counts,
+        "partial_metric_issue_counts": partial_counts,
+        "data_quality_issue_counts": data_quality_counts,
         "accepted_exception_counts": results.get("accepted_exception_counts", {}),
-        "accepted_detail_rows": results.get("accepted_detail_rows") or [],
         "baseline_target_distribution": results.get("baseline_target_distribution", {}),
         "composite_key_audit": results.get("composite_key_audit", {}),
         "student_client_audit": results.get("student_client_audit", {}),
-        "detail_row_count": len(results.get("detail_rows") or []),
+        "detail_row_count": len(detail_rows),
         "accepted_detail_row_count": len(results.get("accepted_detail_rows") or []),
+        "reconciliation": results.get("reconciliation") or {},
     }
+    if school_year:
+        payload["school_year"] = school_year
+    return payload
 
 
-def export_results(results: dict[str, Any], output_dir: Path, *, workbook: str, sheet: str) -> dict[str, str]:
+def export_results(
+    results: dict[str, Any],
+    output_dir: Path,
+    *,
+    workbook: str,
+    sheet: str,
+    school_year: str | None = None,
+) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    payload = results_to_json_payload(results, workbook=workbook, sheet=sheet)
+    detail_rows = results.get("detail_rows") or []
+    accepted_detail_rows = results.get("accepted_detail_rows") or []
+    export_paths = write_partitioned_audit_exports(
+        output_dir,
+        detail_rows=detail_rows,
+        accepted_detail_rows=accepted_detail_rows,
+    )
+    payload = results_to_json_payload(
+        results,
+        workbook=workbook,
+        sheet=sheet,
+        school_year=school_year,
+    )
+    payload["datasets"] = build_dataset_manifest(
+        export_paths=export_paths,
+        detail_rows=detail_rows,
+        accepted_detail_rows=accepted_detail_rows,
+    )
     paths = {
-        "audit_flags": output_dir / "audit_flags.csv",
-        "audit_summary_json": output_dir / "audit_summary.json",
-        "audit_summary_md": output_dir / "audit_summary.md",
+        **export_paths,
+        "audit_summary_json": str(output_dir / "audit_summary.json"),
+        "audit_summary_md": str(output_dir / "audit_summary.md"),
     }
-    write_audit_flags_csv(paths["audit_flags"], results.get("detail_rows") or [])
-    paths["audit_summary_json"].write_text(
+    Path(paths["audit_summary_json"]).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     write_summary_markdown(
-        paths["audit_summary_md"],
+        Path(paths["audit_summary_md"]),
         {
             **payload,
-            "detail_rows": results.get("detail_rows"),
-            "accepted_detail_rows": results.get("accepted_detail_rows"),
+            "detail_rows": detail_rows,
         },
     )
-    return {key: str(path) for key, path in paths.items()}
+    return paths
 
 
 def evaluate_workbook(workbook_path: Path, config: AuditConfig) -> dict[str, Any]:
@@ -1293,6 +2340,14 @@ def evaluate_workbook(workbook_path: Path, config: AuditConfig) -> dict[str, Any
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Flag invalid metric/scale combinations in student metrics summary exports.",
+    )
+    parser.add_argument(
+        "--year",
+        action="append",
+        nargs="+",
+        dest="years",
+        metavar="SY",
+        help="School year(s) to audit. Use 'all' for a cumulative cross-year report.",
     )
     parser.add_argument(
         "--workbook",
@@ -1318,7 +2373,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit 1 if duplicate composite keys or Student ID vs Client ID conflicts.",
+        help="Exit 1 on duplicate keys, ID conflicts, or count reconciliation failures.",
     )
     parser.add_argument(
         "--json",
@@ -1328,64 +2383,155 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _dedupe_years(years: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for year in years:
+        if year not in seen:
+            seen.add(year)
+            unique.append(year)
+    return unique
+
+
+def _flatten_year_tokens(groups: list[list[str]] | None) -> list[str]:
+    if not groups:
+        return []
+    tokens: list[str] = []
+    for group in groups:
+        tokens.extend(group)
+    return tokens
+
+
+def _resolve_audit_plan(
+    args: argparse.Namespace,
+) -> tuple[Literal["cumulative", "per_year", "workbook"], list[tuple[Path, str | None]]]:
+    if args.workbook and args.years:
+        raise ValueError("--workbook and --year are mutually exclusive")
+
+    if args.workbook:
+        return "workbook", [(path.resolve(), None) for path in args.workbook]
+
+    catalog = discover_audit_school_years()
+    tokens = _flatten_year_tokens(args.years)
+    cumulative = any(token.strip().lower() == "all" for token in tokens)
+    if cumulative and len(tokens) > 1:
+        raise ValueError("use --year all alone for cumulative audit")
+
+    years_to_run: list[str] = []
+    if cumulative:
+        years_to_run = catalog
+        mode: Literal["cumulative", "per_year"] = "cumulative"
+    elif tokens:
+        years_to_run = [normalize_school_year(token, catalog) for token in tokens]
+        mode = "per_year"
+    else:
+        school_year = current_school_year()
+        if not school_year:
+            raise ValueError("no --year provided and no default school year in config")
+        years_to_run = [school_year]
+        mode = "per_year"
+
+    jobs: list[tuple[Path, str | None]] = []
+    for school_year in _dedupe_years(years_to_run):
+        workbook = resolve_workbook_for_school_year(
+            school_year,
+            force_fetch=args.force_fetch,
+            fetch_destination=args.fetch_destination,
+        )
+        jobs.append((workbook, school_year))
+    return mode, jobs
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = AuditConfig(sheet_name=args.sheet)
 
-    workbooks: list[Path] = []
-    if args.workbook:
-        workbooks.extend(args.workbook)
-    else:
-        destination = args.fetch_destination or preferred_student_metrics_workbook()
-        try:
-            fetch_result = fetch_student_metrics_workbook(
-                destination=destination,
-                force_fetch=args.force_fetch,
-                require_fresh=True,
-            )
-        except (FileNotFoundError, OSError, RuntimeError) as exc:
-            print(f"error: CISDM fetch failed: {exc}", file=sys.stderr)
-            return 1
-        if not fetch_result.succeeded:
-            print(
-                f"error: CISDM fetch failed and no local workbook at {destination}",
-                file=sys.stderr,
-            )
-            return 1
-        workbooks.append(fetch_result.destination)
+    try:
+        mode, jobs = _resolve_audit_plan(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        print(f"error: CISDM fetch failed: {exc}", file=sys.stderr)
+        return 1
 
-    if not workbooks:
+    if not jobs:
         print("error: no workbook available", file=sys.stderr)
         return 1
 
-    out_dir = default_output_dir()
-    summaries: list[dict[str, Any]] = []
+    base_out = default_output_dir()
+    year_runs: list[tuple[str, dict[str, Any], str]] = []
+    summaries: list[tuple[dict[str, Any], str | None]] = []
 
-    for workbook in workbooks:
-        workbook = workbook.resolve()
+    for workbook, school_year in jobs:
         if not workbook.is_file():
             print(f"error: workbook not found: {workbook}", file=sys.stderr)
             return 1
         results = evaluate_workbook(workbook, config)
-        export_results(results, out_dir, workbook=str(workbook), sheet=config.sheet_name)
-        summaries.append(results)
+        summaries.append((results, school_year))
+        if mode == "cumulative":
+            year_runs.append((school_year or "", results, str(workbook)))
+            continue
+        out_dir = base_out / school_year if school_year else base_out
+        export_results(
+            results,
+            out_dir,
+            workbook=str(workbook),
+            sheet=config.sheet_name,
+            school_year=school_year,
+        )
+        label = school_year or str(workbook)
+        print(f"School year: {label}")
         print(f"Workbook: {workbook}")
         print(f"Output dir: {out_dir}")
         print(f"  rows: {results['summary'].get('rows', 0)}")
         print(f"  flagged_rows: {len(results.get('detail_rows') or [])}")
+        reconciliation = results.get("reconciliation") or {}
+        if reconciliation.get("ok"):
+            print("  reconciliation: ok")
+        else:
+            print(f"  reconciliation: FAILED ({reconciliation.get('error_count', 0)} errors)")
+            for message in reconciliation.get("errors") or []:
+                print(f"    - {message}", file=sys.stderr)
+
+    if mode == "cumulative":
+        paths = export_cumulative_results(year_runs, base_out)
+        print(f"Cumulative audit: {len(year_runs)} school years")
+        print(f"Output dir: {base_out}")
+        for school_year, results, workbook in year_runs:
+            reconciliation = results.get("reconciliation") or {}
+            recon = "ok" if reconciliation.get("ok") else "FAILED"
+            print(
+                f"  {school_year}: rows={results['summary'].get('rows', 0)} "
+                f"flagged={len(results.get('detail_rows') or [])} "
+                f"reconciliation={recon} workbook={workbook}"
+            )
+        print(f"  summary: {paths['audit_summary_md']}")
 
     if args.strict:
-        for results in summaries:
+        for results, _school_year in summaries:
             if results["composite_key_audit"]["duplicate_count"] > 0:
                 return 1
             if results["student_client_audit"]["student_ids_with_multiple_client_ids"] > 0:
                 return 1
+            reconciliation = results.get("reconciliation") or {}
+            if not reconciliation.get("ok", False):
+                return 1
 
     if args.json:
-        payloads = [
-            results_to_json_payload(r, workbook=r["workbook"], sheet=r["sheet"]) for r in summaries
-        ]
-        print(json.dumps(payloads if len(payloads) > 1 else payloads[0], indent=2, sort_keys=True))
+        if mode == "cumulative":
+            print(json.dumps(build_cumulative_payload(year_runs), indent=2, sort_keys=True))
+        else:
+            payloads = [
+                results_to_json_payload(
+                    results,
+                    workbook=results["workbook"],
+                    sheet=results["sheet"],
+                    school_year=school_year,
+                )
+                for results, school_year in summaries
+            ]
+            print(json.dumps(payloads if len(payloads) > 1 else payloads[0], indent=2, sort_keys=True))
 
     return 0
 

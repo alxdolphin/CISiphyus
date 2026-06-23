@@ -8,8 +8,9 @@ from pathlib import Path
 AUDIT_USAGE = """usage: cisiphyus audit <target> [options]
 
 targets:
-  accreditation   Site-level accreditation compliance monitoring
-  metrics         Student metrics summary row-level audit
+  accreditation      Site-level accreditation compliance monitoring
+  metrics            Student metrics summary row-level audit
+  goal-achievement   Goal achievement audit (metrics + GAR + drilldown)
 """
 
 TREND_USAGE = """usage: cisiphyus trend <school-year> [school-year ...] [options]
@@ -62,6 +63,14 @@ def run_metrics_audit(argv: list[str]) -> int:
     )
 
 
+def run_goal_achievement_audit(argv: list[str]) -> int:
+    return _run_example_module(
+        example_dir=repo_root() / "examples" / "goal_achievement",
+        module_name="goal_achievement",
+        argv=argv,
+    )
+
+
 def run_audit_app(argv: list[str]) -> int:
     if not argv or argv[0] in ("--help", "-h"):
         print(AUDIT_USAGE, file=sys.stderr)
@@ -73,8 +82,14 @@ def run_audit_app(argv: list[str]) -> int:
         return run_accreditation_monitor(rest)
     if target == "metrics":
         return run_metrics_audit(rest)
+    if target == "goal-achievement":
+        return run_goal_achievement_audit(rest)
 
-    print(f"Error: unknown audit target {target!r}. Use 'accreditation' or 'metrics'.", file=sys.stderr)
+    print(
+        f"Error: unknown audit target {target!r}. "
+        "Use 'accreditation', 'metrics', or 'goal-achievement'.",
+        file=sys.stderr,
+    )
     print(AUDIT_USAGE, file=sys.stderr)
     return 1
 

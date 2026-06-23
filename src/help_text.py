@@ -76,6 +76,17 @@ def format_full_help(*, build_retrieval_parser: Callable[..., Any]) -> str:
     else:
         parts.append(_section("AUDIT METRICS", _parser_help(audit, prog="cisiphyus audit metrics")))
 
+    goal_achievement = _import_example_builder("goal_achievement", "goal_achievement", "build_parser")
+    if goal_achievement is None:
+        missing_examples.append("goal_achievement")
+    else:
+        parts.append(
+            _section(
+                "AUDIT GOAL-ACHIEVEMENT",
+                _parser_help(goal_achievement, prog="cisiphyus audit goal-achievement"),
+            )
+        )
+
     qpr = _import_example_builder("qpr", "qpr", "build_parser")
     if qpr is None:
         missing_examples.append("qpr")

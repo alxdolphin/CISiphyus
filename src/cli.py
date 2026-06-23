@@ -7,6 +7,7 @@
 #   cisiphyus --bootstrap
 #   cisiphyus audit accreditation
 #   cisiphyus audit metrics
+#   cisiphyus audit goal-achievement
 #   cisiphyus trend SY25-26
 #   cisiphyus trend cross-year
 #   cisiphyus qpr --grading-period 2.0 ...

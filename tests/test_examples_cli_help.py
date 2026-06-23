@@ -36,6 +36,7 @@ def test_format_full_help_includes_command_sections() -> None:
     text = help_text.format_full_help(build_retrieval_parser=cli._build_retrieval_parser)
     assert "cisiphyus audit accreditation" in text
     assert "cisiphyus audit metrics" in text
+    assert "cisiphyus audit goal-achievement" in text
     assert "cisiphyus qpr" in text
     assert "cisiphyus trend" in text
     assert "cisiphyus trend cross-year" in text

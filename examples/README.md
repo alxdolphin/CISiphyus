@@ -10,8 +10,41 @@ pin a local file for CI or reproducible reruns.
 | Application | CISiphyus report | Output |
 |---|---|---|
 | Accreditation monitoring | `accreditation` | Site flag CSVs / summaries |
+| Student metrics audit | `student_metrics_summary` | Row-level metric/scale flags |
+| Goal achievement audit | `student_metrics_summary` + `accreditation` | Drilldown vs metrics coverage flags |
+| Goal achievement summary | `goal_achievement` | Aggregate goal-area counts |
 | QPR provisioning | `student_metrics_summary` | Per-site `Q{n}_{Site}_QPR.xlsx` |
 | Longitudinal trend tracker | `accreditation` + `student_metrics_summary` | QoQ movement + regression CSVs / summaries |
+
+`audit goal-achievement` runs inherited checks from `audit_metrics_all.py` and `audit_gar.py` on **student metrics**, then cross-checks **accreditation Student Drilldown**. It does not use the aggregate Goal Achievement Summary pull. `audit metrics` remains a standalone entry point for the same metrics audit alone.
+
+## goal achievement audit (`goal_achievement/`)
+
+Inherited metrics + GAR checks plus drilldown cross-check.
+
+```bash
+cisiphyus audit goal-achievement
+cisiphyus audit goal-achievement --school-year SY25-26
+cisiphyus audit goal-achievement --strict
+```
+
+Pin local workbooks:
+
+```bash
+cisiphyus audit goal-achievement \\
+  --student-metrics-workbook path/to/StudentMetrics.xlsx \\
+  --accreditation-workbook path/to/Accreditation_Report.xlsx
+```
+
+Outputs: `goal_achievement_summary.md`, `goal_achievement_summary.json`, `metrics_audit_flags.csv`, `gar_exceptions.csv`, `drilldown_exceptions.csv`.
+
+## goal achievement summary (`goal_achievement` pull)
+
+Aggregate counts by goal area (`CIS_GoalAchievement_Summary`, FormID `1000002372`).
+
+```bash
+cisiphyus pull goal_achievement
+```
 
 ## accreditation site monitoring (`accreditation/`)
 
@@ -135,6 +168,9 @@ Compare outputs: `artifacts/trends/{school-year}/{Q1_vs_Q2}/`
 | `CISPHYUS_HEADED` | `1` to show the browser during cisiphyus retrieval |
 | `ACCREDITATION_WORKBOOK` / `ACCREDITATION_LOCAL_INPUTS_DIR` | Accreditation workbook destination |
 | `ACCREDITATION_MAX_AGE_HOURS` | Freshness gate for the accreditation workbook (default 24) |
+| `GOAL_ACHIEVEMENT_STUDENT_METRICS_WORKBOOK` / `GOAL_ACHIEVEMENT_ACCREDITATION_WORKBOOK` | Input workbook paths |
+| `GOAL_ACHIEVEMENT_LOCAL_INPUTS_DIR` | Cached CISDM pull copies (default `artifacts/goal_achievement/`) |
+| `GOAL_ACHIEVEMENT_OUTPUT_DIR` | Audit output root (default `artifacts/goal_achievement/`) |
 | `QPR_STUDENT_METRICS_WORKBOOK` / `QPR_LOCAL_INPUTS_DIR` | Student metrics workbook destination |
 | `QPR_OUTPUT_DIR` | QPR provision output root (default `artifacts/qpr/`) |
 | `QPR_FETCH_STUDENT_METRICS` | `1` to force a refresh even when fresh |
