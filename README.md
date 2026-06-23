@@ -78,10 +78,26 @@ cisiphyus audit accreditation
 ```
 
 **Audit Student Metrics**
-> Retrieve `student_metrics_summary` and flag row-level data-quality issues.
+> Retrieve `student_metrics_summary` and flag row-level data-quality issues (ABC domain, scales, progress structure). Use this for accreditation metric QA — not goal-achievement outcome labels.
 
 ```bash
 cisiphyus audit metrics
+```
+
+**Audit Goal Achievement**
+> Runs inherited `audit_metrics_all` + `audit_gar` checks on `student_metrics_summary`, then cross-checks accreditation `Accreditation Student Drilldown`. The CISDM Goal Achievement Summary report is aggregate-only and is not used for this audit.
+
+```bash
+cisiphyus audit goal-achievement
+cisiphyus audit goal-achievement --school-year SY25-26
+cisiphyus audit goal-achievement --strict --no-domain-scale
+```
+
+**Goal Achievement Summary (aggregate only)**
+> Rollup counts by goal area (sheet `CIS_GoalAchievement_Summary`, FormID `1000002372`).
+
+```bash
+cisiphyus pull goal_achievement
 ```
 
 **Provision Quarterly Progress Reports**
