@@ -10,7 +10,7 @@ AUDIT_USAGE = """usage: cisiphyus audit <target> [options]
 targets:
   accreditation      Site-level accreditation compliance monitoring
   metrics            Student metrics summary row-level audit
-  goal-achievement   Goal achievement audit (metrics + GAR + drilldown)
+  goal-achievement   Goal achievement audit (GAR on goal tracking + drilldown)
 """
 
 TREND_USAGE = """usage: cisiphyus trend <school-year> [school-year ...] [options]
@@ -64,11 +64,14 @@ def run_metrics_audit(argv: list[str]) -> int:
 
 
 def run_goal_achievement_audit(argv: list[str]) -> int:
-    return _run_example_module(
-        example_dir=repo_root() / "examples" / "goal_achievement",
-        module_name="goal_achievement",
-        argv=argv,
-    )
+    audit_dir = repo_root() / "examples" / "audit"
+    goal_dir = repo_root() / "examples" / "goal_achievement"
+    accred_dir = repo_root() / "examples" / "accreditation"
+    for path in (audit_dir, goal_dir, accred_dir):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+    module = __import__("goal_achievement_audit")
+    return int(module.main(argv))
 
 
 def run_audit_app(argv: list[str]) -> int:

@@ -1,4 +1,4 @@
-"""Load goal-achievement and metrics audit logic from the parent CIS repo."""
+"""Load metrics audit logic from the parent CIS repo."""
 
 from __future__ import annotations
 
@@ -18,13 +18,6 @@ def _load_module(name: str, path: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def load_audit_gar() -> ModuleType:
-    return _load_module(
-        "cis_audit_gar",
-        TOOLS_DIR / "goal-achievement/scripts/audit_gar.py",
-    )
 
 
 def load_audit_metrics_all() -> ModuleType:

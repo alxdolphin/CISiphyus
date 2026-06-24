@@ -85,12 +85,12 @@ cisiphyus audit metrics
 ```
 
 **Audit Goal Achievement**
-> Runs inherited `audit_metrics_all` + `audit_gar` checks on `student_metrics_summary`, then cross-checks accreditation `Accreditation Student Drilldown`. The CISDM Goal Achievement Summary report is aggregate-only and is not used for this audit.
+> Runs GAR logic in `examples/audit/audit.py` on `goal_tracking_student_goals` (`CIS_StudentProgress_Detail`), then cross-checks accreditation `Accreditation Student Drilldown` against `student_metrics_summary`. Use `audit metrics` for row-level metric QA.
 
 ```bash
+cisiphyus pull goal_tracking_student_goals --school-year SY25-26
 cisiphyus audit goal-achievement
 cisiphyus audit goal-achievement --school-year SY25-26
-cisiphyus audit goal-achievement --strict --no-domain-scale
 ```
 
 **Goal Achievement Summary (aggregate only)**

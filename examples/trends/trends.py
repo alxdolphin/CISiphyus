@@ -371,7 +371,7 @@ def archive_workbooks(
 ) -> tuple[Path | None, Path]:
     dest_dir = inputs_dir / school_year / period
     dest_dir.mkdir(parents=True, exist_ok=True)
-    met_dest = dest_dir / met_wb.name
+    met_dest = dest_dir / "metrics.xlsx"
     shutil.copy2(met_wb, met_dest)
     if acc_wb is None:
         return None, met_dest.resolve()
@@ -699,7 +699,7 @@ def _resolve_workbooks(
             raise FileNotFoundError(f"accreditation workbook unavailable at {destination}")
         acc_path = fetch.destination
     if met_path is None:
-        destination = audit.preferred_student_metrics_workbook()
+        destination = audit.preferred_student_metrics_workbook(school_year=school_year)
         fetch = audit.fetch_student_metrics_workbook(
             destination=destination,
             force_fetch=force_fetch,
@@ -756,7 +756,7 @@ def capture_snapshot(
             force_fetch=force_fetch,
         )
     monitor_cfg = monitor_config or accreditation.MonitorConfig()
-    audit_cfg = audit_config or audit.AuditConfig()
+    audit_cfg = audit_config or audit.AuditConfig(school_year=school_year)
 
     if acc_wb is not None:
         acc_results = accreditation.evaluate_workbook(acc_wb, monitor_cfg)
@@ -771,7 +771,7 @@ def capture_snapshot(
     )
     school_rollup = build_school_rollup(met_results.get("detail_rows") or [])
     grading_period_stats = audit.grading_period_fill_stats(met_wb, audit_cfg.sheet_name)
-    progress_payload = audit.progress_rollup(met_wb, audit_cfg.sheet_name)
+    progress_payload = met_results["progress_rollup"]
 
     if slot.exists() and force:
         shutil.rmtree(slot)
@@ -1404,6 +1404,21 @@ def compare_cross_year_snapshots(
     )
 
 
+def _audit_config_from_snapshot_meta(meta: dict[str, Any]) -> audit.AuditConfig:
+    cfg = meta.get("audit_config") or {}
+    excluded = cfg.get("excluded_student_ids")
+    if excluded is not None:
+        excluded = set(excluded)
+    goal_progress_wb = cfg.get("goal_progress_workbook")
+    return audit.AuditConfig(
+        sheet_name=cfg.get("sheet_name", audit.DEFAULT_SHEET),
+        include_ok_rows=bool(cfg.get("include_ok_rows", False)),
+        school_year=meta.get("school_year") or cfg.get("school_year"),
+        goal_progress_workbook=Path(goal_progress_wb) if goal_progress_wb else None,
+        excluded_student_ids=excluded,
+    )
+
+
 def backfill_progress_rollups(
     snapshots_dir: Path,
     *,
@@ -1426,8 +1441,9 @@ def backfill_progress_rollups(
         metrics_wb = (meta.get("source_workbooks") or {}).get("metrics")
         if not metrics_wb or not Path(metrics_wb).is_file():
             continue
-        sheet = (meta.get("audit_config") or {}).get("sheet_name", audit.DEFAULT_SHEET)
-        progress_payload = audit.progress_rollup(Path(metrics_wb), sheet)
+        audit_cfg = _audit_config_from_snapshot_meta(meta)
+        met_results = audit.evaluate_workbook(Path(metrics_wb), audit_cfg)
+        progress_payload = met_results["progress_rollup"]
         met_dir = slot / "metrics"
         met_dir.mkdir(parents=True, exist_ok=True)
         _write_json(progress_path, progress_payload)

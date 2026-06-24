@@ -3,9 +3,24 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook
+
+GOAL_PROGRESS_SHEET = "CIS_StudentProgress_Detail"
+GOAL_PROGRESS_HEADERS = [
+    "Student ID",
+    "Home School",
+    "Goal",
+    "Metric",
+    "Baseline",
+    "Target",
+    "Achieved Value",
+    "Goal Achievement",
+    "Enrollment Begin Date",
+    "Enrollment Exit Date",
+]
 
 METRICS_HEADERS = [
     "Organization",
@@ -119,6 +134,61 @@ def build_metrics_fixture(path: Path) -> None:
         ],
     ]
     for row_index, row in enumerate(rows, start=2):
+        for col_index, value in enumerate(row, start=1):
+            sheet.cell(row=row_index, column=col_index, value=value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+
+
+def build_goal_progress_fixture(path: Path) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = GOAL_PROGRESS_SHEET
+    sheet.cell(row=1, column=1, value="Goal Tracking export")
+    sheet.cell(row=2, column=1, value="Student progress detail")
+    for index, header in enumerate(GOAL_PROGRESS_HEADERS, start=1):
+        sheet.cell(row=3, column=index, value=header)
+
+    recent_start = (date.today() - timedelta(days=10)).isoformat()
+    rows = [
+        [
+            "1001",
+            "Test School",
+            "Improve Attendance",
+            "Attendance Rate (%)",
+            "85",
+            "90",
+            "91",
+            "Goal Not Met, No Progress",
+            "2025-08-01",
+            None,
+        ],
+        [
+            "1002",
+            "Test School",
+            "Improve Attendance",
+            "Attendance Rate (%)",
+            None,
+            "88",
+            "87",
+            "Goal Not Met, No Progress",
+            recent_start,
+            None,
+        ],
+        [
+            "1003",
+            "Test School",
+            "Improve Academics",
+            "Custom Widget Score",
+            "1",
+            "2",
+            "3",
+            "Goal Met",
+            "2025-08-01",
+            None,
+        ],
+    ]
+    for row_index, row in enumerate(rows, start=4):
         for col_index, value in enumerate(row, start=1):
             sheet.cell(row=row_index, column=col_index, value=value)
     path.parent.mkdir(parents=True, exist_ok=True)

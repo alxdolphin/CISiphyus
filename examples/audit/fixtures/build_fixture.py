@@ -122,10 +122,10 @@ ROWS = [
         "Test School",
         "S006",
         "C006",
-        "Improve Attendance",
-        "Attendance Rate (days absent)",
+        "Improve School Behavior",
+        "Tardies",
+        "5",
         "10",
-        "15",
         "Active",
         "2025-26",
         "Coordinator A",
@@ -260,7 +260,7 @@ ROWS = [
         "",
         "",
     ],
-    # baseline without target (non-goal context for S013)
+    # baseline without target (non-goal metric for S013)
     [
         "CIS Test Org",
         "Test School",

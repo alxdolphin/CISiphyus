@@ -28,8 +28,11 @@ def _workbook(tmp_path: Path) -> Path:
     return path
 
 
-def _evaluate(workbook: Path) -> dict:
-    return audit.evaluate_workbook(workbook, audit.AuditConfig())
+def _evaluate(workbook: Path, *, school_year: str | None = None) -> dict:
+    return audit.evaluate_workbook(
+        workbook,
+        audit.AuditConfig(school_year=school_year),
+    )
 
 
 def _record(**kwargs: object) -> dict[str, object]:
@@ -71,44 +74,39 @@ def test_fixture_flags_domain_and_scale_issues(tmp_path: Path) -> None:
 def test_fixture_flags_structural_issues(tmp_path: Path) -> None:
     results = _evaluate(_workbook(tmp_path))
     counts = results["issue_code_counts"]
+    accepted = results["accepted_exception_counts"]
     assert counts.get("both_baseline_and_target_blank", 0) >= 1
     assert counts.get("both_blank_with_two_progress_reports", 0) >= 1
-    assert "target_without_baseline" not in counts
-    assert "baseline_without_target" not in counts
-    assert counts.get("baseline_without_target_non_goal_context", 0) >= 1
-    assert "baseline_without_target_no_goal_context" not in counts
+    assert counts.get("baseline_without_target", 0) >= 1
+    assert counts.get("target_without_baseline", 0) >= 1
+    assert accepted.get("baseline_without_target_supplemental_metric", 0) >= 1
     assert counts.get("duplicate_composite_key", 0) >= 1
     assert counts.get("student_client_id_mismatch", 0) >= 2
     assert counts.get("case_manager_blank", 0) >= 1
 
 
-def test_no_goal_context_is_accepted_not_flagged(tmp_path: Path) -> None:
+def test_monday_non_goal_metric_rule(tmp_path: Path) -> None:
     results = _evaluate(_workbook(tmp_path))
     accepted_counts = results["accepted_exception_counts"]
-    assert accepted_counts.get("baseline_without_target_no_goal_context", 0) == 1
-    assert accepted_counts.get("target_without_baseline_no_goal_context", 0) == 1
+    assert accepted_counts.get("baseline_without_target_supplemental_metric", 0) == 1
 
     accepted_rows = {
         row["student_id"]: row for row in results.get("accepted_detail_rows") or []
     }
     assert (
-        accepted_rows["S012"]["issue_codes"]
-        == "baseline_without_target_no_goal_context"
-    )
-    assert (
-        accepted_rows["S011"]["issue_codes"]
-        == "target_without_baseline_no_goal_context"
+        accepted_rows["S013"]["issue_codes"]
+        == "baseline_without_target_supplemental_metric"
     )
 
     flagged_rows = results.get("detail_rows") or []
     flagged_ids = {row["student_id"] for row in flagged_rows}
-    assert "S012" not in flagged_ids
-    assert "S011" not in flagged_ids
+    assert "S012" in flagged_ids
+    assert "S011" in flagged_ids
+    assert "S013" not in flagged_ids
 
-    s013_rows = [row for row in flagged_rows if row.get("student_id") == "S013"]
-    assert len(s013_rows) == 1
-    codes = set(s013_rows[0]["issue_codes"].split(";"))
-    assert codes == {"baseline_without_target_non_goal_context"}
+    s012_rows = [row for row in flagged_rows if row.get("student_id") == "S012"]
+    assert len(s012_rows) == 1
+    assert s012_rows[0]["issue_codes"] == "baseline_without_target"
 
 
 def test_export_includes_accepted_exceptions_section(tmp_path: Path) -> None:
@@ -124,26 +122,62 @@ def test_export_includes_accepted_exceptions_section(tmp_path: Path) -> None:
     assert "## Accepted exceptions" in markdown
     assert "## Partial goal metrics" in markdown
     assert "## Data quality issues" in markdown
-    assert "baseline_without_target_no_goal_context" in markdown
+    assert "baseline_without_target_supplemental_metric" in markdown
 
     payload = json.loads(Path(paths["audit_summary_json"]).read_text(encoding="utf-8"))
-    assert payload["accepted_detail_row_count"] == 2
-    assert payload["accepted_exception_counts"]["baseline_without_target_no_goal_context"] == 1
-    assert payload["accepted_exception_counts"]["target_without_baseline_no_goal_context"] == 1
+    assert payload["accepted_detail_row_count"] == 1
+    assert payload["accepted_exception_counts"]["baseline_without_target_supplemental_metric"] == 1
     assert "accepted_detail_rows" not in payload
-    assert payload["datasets"]["accepted_no_goal_context"]["row_count"] == 2
-    assert payload["datasets"]["partial_goal_metrics_flags"]["row_count"] == 1
+    assert payload["datasets"]["accepted_supplemental"]["row_count"] == 1
+    assert payload["datasets"]["partial_goal_metrics_flags"]["row_count"] == 2
 
     flags_csv = Path(paths["audit_flags"]).read_text(encoding="utf-8")
     assert "S012" not in flags_csv
     assert "S013" not in flags_csv
 
-    no_goal_csv = Path(paths["accepted_no_goal_context"]).read_text(encoding="utf-8")
-    assert "S012" in no_goal_csv
+    supplemental_csv = Path(paths["accepted_supplemental"]).read_text(encoding="utf-8")
+    assert "S013" in supplemental_csv
 
     partial_csv = Path(paths["partial_goal_metrics_flags"]).read_text(encoding="utf-8")
-    assert "S013" in partial_csv
-    assert "non_goal_context" in partial_csv
+    assert "S012" in partial_csv
+    assert "S011" in partial_csv
+
+
+def test_exited_rows_included_for_current_school_year() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Test School",
+            "Student ID": "S020",
+            "Client ID": "C020",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Exited",
+            "School Year": "2025-26",
+        },
+        {
+            "row_number": 3,
+            "School": "Test School",
+            "Student ID": "S020",
+            "Client ID": "C020",
+            "Goal": "Improve School Behavior",
+            "Metric": "Suspensions",
+            "Baseline": "3",
+            "Target": "2",
+            "Enrollment Status": "Enrolled",
+            "School Year": "2025-26",
+        },
+    ]
+    results = audit.run_audit(
+        records,
+        school_year="SY25-26",
+        excluded_student_ids=set(),
+    )
+    assert results["summary"]["rows"] == 2
+    assert results["summary"]["exited_rows_excluded"] == 0
+    assert results["summary"]["enrollment_filter"] == "all_students_except_ewgspe_only"
 
 
 def test_reconcile_passes_on_fixture(tmp_path: Path) -> None:
@@ -153,7 +187,6 @@ def test_reconcile_passes_on_fixture(tmp_path: Path) -> None:
     assert reconciliation["error_count"] == 0
     assert reconciliation["baseline_without_target_excl_supplemental"] == (
         reconciliation["baseline_flagged_primary"]
-        + reconciliation["baseline_no_abc_goals"]
     )
 
 
@@ -168,14 +201,16 @@ def test_reconcile_passes_on_sy24_25_archive() -> None:
     )
     if not workbook.is_file():
         pytest.skip("SY24-25 archive not available")
-    results = _evaluate(workbook)
+    results = _evaluate(workbook, school_year="SY24-25")
     reconciliation = results["reconciliation"]
     assert reconciliation["ok"] is True
-    assert reconciliation["baseline_without_target_raw"] == 3393
-    assert reconciliation["baseline_without_target_excl_supplemental"] == 1745
-    assert reconciliation["baseline_supplemental_excluded"] == 1648
-    assert reconciliation["baseline_flagged_primary"] == 1105
-    assert reconciliation["baseline_no_abc_goals"] == 640
+    assert results["summary"]["rows"] == 6634
+    assert results["summary"]["ewgspe_only_students_excluded"] == 83
+    assert results["summary"]["enrollment_filter"] == "all_students_except_ewgspe_only"
+    assert reconciliation["baseline_without_target_raw"] == 3280
+    assert reconciliation["baseline_without_target_excl_supplemental"] == 0
+    assert reconciliation["baseline_supplemental_excluded"] == 3280
+    assert reconciliation["baseline_flagged_primary"] == 0
 
 
 def test_reconcile_passes_for_all_archived_years() -> None:
@@ -190,7 +225,7 @@ def test_reconcile_passes_for_all_archived_years() -> None:
         )
         if not metrics:
             continue
-        results = _evaluate(metrics[0])
+        results = _evaluate(metrics[0], school_year=school_year)
         reconciliation = results["reconciliation"]
         if not reconciliation.get("ok"):
             failures.append(
@@ -201,15 +236,109 @@ def test_reconcile_passes_for_all_archived_years() -> None:
     workbook = archives / "SY24-25" / "EOY" / "metrics.xlsx"
     if not workbook.is_file():
         pytest.skip("SY24-25 archive not available")
-    results = _evaluate(workbook)
+    results = _evaluate(workbook, school_year="SY24-25")
     distribution = results["baseline_target_distribution"]
     accepted = results["accepted_exception_counts"]
     raw = distribution["baseline_without_target"]
     excluded = audit.accepted_baseline_supplemental_exclusions(accepted)
     excl = audit.baseline_without_target_excl_supplemental(distribution, accepted)
     assert excl == raw - excluded
-    assert excl < raw
-    assert results["issue_code_counts"]["baseline_without_target_non_goal_context"] <= excl
+    assert results["issue_code_counts"].get("baseline_without_target", 0) <= excl
+
+
+def test_ewgspe_only_student_excluded() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Test School",
+            "Student ID": "S020",
+            "Client ID": "C020",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Exited",
+            "School Year": "2025-26",
+        },
+        {
+            "row_number": 3,
+            "School": "Test School",
+            "Student ID": "S021",
+            "Client ID": "C021",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "80",
+            "Target": "88",
+            "Enrollment Status": "Enrolled",
+            "School Year": "2025-26",
+        },
+    ]
+    results = audit.run_audit(
+        records,
+        school_year="SY25-26",
+        excluded_student_ids={"S020"},
+    )
+    assert results["summary"]["rows"] == 1
+    assert results["summary"]["ewgspe_only_students_excluded"] == 1
+    assert results["summary"]["rows_excluded_ewgspe_students"] == 1
+
+
+def test_load_final_goal_achievement_student_ids_from_fixture(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "goal_achievement_build_fixture",
+        EXAMPLE_DIR.parent / "goal_achievement" / "fixtures" / "build_fixture.py",
+    )
+    assert spec and spec.loader
+    build_fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build_fixture)
+    accred = tmp_path / "accreditation.xlsx"
+    build_fixture.build_accreditation_fixture(accred)
+    completed = audit.load_final_goal_achievement_student_ids(accred)
+    assert completed == {"1001"}
+
+
+def test_closed_school_year_audits_all_rows() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Test School",
+            "Student ID": "S020",
+            "Client ID": "C020",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Exited",
+            "School Year": "2024/2025 SY",
+        },
+    ]
+    results = audit.run_audit(records, school_year="SY24-25", excluded_student_ids=set())
+    assert results["summary"]["rows"] == 1
+    assert results["summary"]["exited_rows_excluded"] == 0
+    assert results["summary"]["enrollment_filter"] == "all_students_except_ewgspe_only"
+
+
+def test_exited_filter_skipped_without_school_year_context() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Test School",
+            "Student ID": "S020",
+            "Client ID": "C020",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Exited",
+            "School Year": "2024/2025 SY",
+        },
+    ]
+    results = audit.run_audit(records)
+    assert results["summary"]["rows"] == 1
+    assert results["summary"]["exited_rows_excluded"] == 0
+    assert results["summary"]["enrollment_filter"] == "all_rows"
 
 
 def test_percent_attendance_rejects_days_absent_target() -> None:
@@ -273,6 +402,121 @@ def test_direction_mismatch_higher_is_better() -> None:
     assert "baseline_target_direction_mismatch" in result["issue_codes"]
 
 
+def test_days_absent_skips_direction_mismatch() -> None:
+    result = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Attendance Rate (days absent)",
+            Baseline="28",
+            Target="40",
+        )
+    )
+    assert "baseline_target_direction_mismatch" not in result["issue_codes"]
+
+    result = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Attendance Rate (days absent)",
+            Baseline="21",
+            Target="17",
+        )
+    )
+    assert "baseline_target_direction_mismatch" not in result["issue_codes"]
+
+
+def test_equal_baseline_target_not_direction_mismatch() -> None:
+    result = audit.analyze_record(
+        _record(
+            Goal="Improve School Behavior",
+            Metric="Suspensions",
+            Baseline="0",
+            Target="0",
+        )
+    )
+    assert "baseline_target_direction_mismatch" not in result["issue_codes"]
+
+
+def test_attendance_permissive_target_slack() -> None:
+    ok = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Tardies",
+            Baseline="5",
+            Target="6",
+        )
+    )
+    assert "baseline_target_direction_mismatch" not in ok["issue_codes"]
+
+    bad = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Tardies",
+            Baseline="5",
+            Target="7",
+        )
+    )
+    assert "baseline_target_direction_mismatch" in bad["issue_codes"]
+
+    ok_rate = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Attendance Rate (%)",
+            Baseline="85",
+            Target="84",
+        )
+    )
+    assert "baseline_target_direction_mismatch" not in ok_rate["issue_codes"]
+
+    bad_rate = audit.analyze_record(
+        _record(
+            Goal="Improve Attendance",
+            Metric="Attendance Rate (%)",
+            Baseline="85",
+            Target="83",
+        )
+    )
+    assert "baseline_target_direction_mismatch" in bad_rate["issue_codes"]
+
+
+def test_behavior_metrics_no_permissive_slack() -> None:
+    suspensions = audit.analyze_record(
+        _record(
+            Goal="Improve School Behavior",
+            Metric="Suspensions",
+            Baseline="0",
+            Target="1",
+        )
+    )
+    assert "baseline_target_direction_mismatch" in suspensions["issue_codes"]
+
+    tardies = audit.analyze_record(
+        _record(
+            Goal="Improve School Behavior",
+            Metric="Tardies",
+            Baseline="5",
+            Target="6",
+        )
+    )
+    assert "baseline_target_direction_mismatch" in tardies["issue_codes"]
+
+
+def test_detail_row_includes_latest_progress() -> None:
+    row = audit._detail_row(
+        {
+            "row_number": 2,
+            "Student ID": "S001",
+            "School": "Test School",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Latest Progress": "91",
+        },
+        ["baseline_scale_mismatch"],
+    )
+    assert row["latest_progress"] == "91"
+
+
 def test_export_writes_outputs(tmp_path: Path) -> None:
     workbook = _workbook(tmp_path)
     results = _evaluate(workbook)
@@ -294,6 +538,8 @@ def test_export_writes_outputs(tmp_path: Path) -> None:
         assert Path(paths[name]).is_file(), name
     payload = json.loads(Path(paths["audit_summary_json"]).read_text(encoding="utf-8"))
     assert payload["detail_row_count"] > 0
+    flags_header = Path(paths["audit_flags"]).read_text(encoding="utf-8").splitlines()[0]
+    assert "latest_progress" in flags_header
 
 
 def test_strict_exits_on_duplicate_keys(tmp_path: Path, monkeypatch) -> None:
@@ -313,7 +559,7 @@ def test_default_cisiphyus_root_is_repo_root() -> None:
 def test_cisiphyus_cmd_matches_slim_cli(monkeypatch) -> None:
     monkeypatch.delenv("AUDIT_CISPHYUS_HEADED", raising=False)
     monkeypatch.delenv("CISPHYUS_HEADED", raising=False)
-    cmd = audit._cisiphyus_cmd(REPO_ROOT)
+    cmd = audit._cisiphyus_cmd(REPO_ROOT, "student_metrics_summary")
     assert cmd == [
         sys.executable,
         str(REPO_ROOT / "run.py"),
@@ -322,9 +568,11 @@ def test_cisiphyus_cmd_matches_slim_cli(monkeypatch) -> None:
     ]
 
     monkeypatch.setenv("CISPHYUS_HEADED", "1")
-    assert audit._cisiphyus_cmd(REPO_ROOT)[-1] == "--headed"
+    assert audit._cisiphyus_cmd(REPO_ROOT, "student_metrics_summary")[-1] == "--headed"
 
-    assert audit._cisiphyus_cmd(REPO_ROOT, school_year="SY24-25")[-2:] == [
+    assert audit._cisiphyus_cmd(
+        REPO_ROOT, "student_metrics_summary", school_year="SY24-25"
+    )[-2:] == [
         "--school-year",
         "SY24-25",
     ]
@@ -395,6 +643,78 @@ def test_year_single_writes_per_year_output(tmp_path: Path, monkeypatch) -> None
     assert code == 0
     assert (out_root / "SY24-25" / "audit_summary.md").is_file()
     assert not (out_root / "audit_summary.md").exists()
+
+
+def test_ewgspe_only_student_ids_logic() -> None:
+    by_student = {
+        "A": {audit.GOAL_ACHIEVEMENT_EWGSPE},
+        "B": {audit.GOAL_ACHIEVEMENT_EWGSPE, "Goal Met"},
+        "C": set(),
+    }
+    excluded = audit.ewgspe_only_student_ids(by_student)
+    assert excluded == {"A"}
+
+
+def test_abc_baselines_incomplete_flags_student() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Test School",
+            "Student ID": "S100",
+            "Client ID": "C100",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Enrolled",
+            "School Year": "2025-26",
+        },
+    ]
+    results = audit.run_audit(records, school_year="SY25-26", excluded_student_ids=set())
+    counts = results["student_completeness_issue_counts"]
+    assert counts["abc_baselines_incomplete"] == 1
+    assert counts.get("abc_target_missing", 0) == 0
+
+
+def test_attendance_only_district_requires_attendance_only() -> None:
+    records = [
+        {
+            "row_number": 2,
+            "School": "Pocono Mountain West High School",
+            "Student ID": "S200",
+            "Client ID": "C200",
+            "Goal": "Improve Attendance",
+            "Metric": "Attendance Rate (%)",
+            "Baseline": "85",
+            "Target": "90",
+            "Enrollment Status": "Enrolled",
+            "School Year": "2025-26",
+        },
+    ]
+    results = audit.run_audit(
+        records,
+        school_year="SY25-26",
+        excluded_student_ids=set(),
+    )
+    counts = results["student_completeness_issue_counts"]
+    assert "abc_baselines_incomplete" not in counts
+    assert "attendance_baseline_missing" not in counts
+    assert "attendance_target_missing" not in counts
+
+
+def test_load_goal_achievement_from_goal_tracking_sheet(tmp_path: Path) -> None:
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "artifacts"
+        / "latest"
+        / "goal_tracking_student_goals"
+        / "raw.xlsx"
+    )
+    if not src.is_file():
+        pytest.skip("goal_tracking_student_goals pull not available")
+    by_student = audit.load_goal_achievement_values_by_student(src)
+    assert by_student
+    assert audit.ewgspe_only_student_ids(by_student)
 
 
 def test_progress_status_on_track_for_fixture_row(tmp_path: Path) -> None:

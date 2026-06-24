@@ -26,7 +26,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, TypeAlias
 
@@ -46,15 +46,16 @@ def default_output_dir() -> Path:
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 STUDENT_METRICS_MAX_AGE_HOURS = 24.0
 CISIPHYUS_REPORT_ID = "student_metrics_summary"
+GOAL_TRACKING_REPORT_ID = "goal_tracking_student_goals"
 DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
 SCHOOL_YEAR_LABEL_RE = re.compile(r"^SY\d{2}-\d{2}$", re.IGNORECASE)
 SCHOOL_YEAR_SHORT_RE = re.compile(r"^SY\d{2}$", re.IGNORECASE)
 ARCHIVE_PERIOD = "EOY"
 METRICS_GLOBS = (
+    "metrics.xlsx",
     "*StudentMetrics*.xlsx",
     "*student_metrics*.xlsx",
     "*MetricsSummary*.xlsx",
-    "metrics.xlsx",
 )
 CUMULATIVE_METRIC_ORDER = (
     "rows_evaluated",
@@ -176,13 +177,244 @@ def _find_metrics_workbook(period_dir: Path) -> Path | None:
     return None
 
 
+ACCREDITATION_REPORT_FILENAME = "Accreditation_Report.xlsx"
+DRILLDOWN_SHEET_NAME = "Accreditation Student Drilldown"
+FINAL_GOAL_ACHIEVEMENT_COLUMN = (
+    "Goal Achievement Entered for ALL assigned goals?"
+)
+STUDENT_ID_COLUMN = "Student ID"
+
+
+def _normalize_header_cell(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def resolve_accreditation_workbook_for_school_year(school_year: str | None) -> Path | None:
+    repo_root = Path(__file__).resolve().parents[2]
+    live_accreditation = (
+        repo_root / "artifacts" / "accreditation" / ACCREDITATION_REPORT_FILENAME
+    )
+    pull_accreditation = (
+        default_archives_dir()
+        / school_year
+        / "pulls"
+        / "accreditation"
+        / "raw.xlsx"
+        if school_year
+        else None
+    )
+    archive_accreditation = (
+        default_archives_dir()
+        / school_year
+        / ARCHIVE_PERIOD
+        / ACCREDITATION_REPORT_FILENAME
+        if school_year
+        else None
+    )
+    current_school_year_label = current_school_year()
+    candidates: list[Path] = []
+    if school_year and current_school_year_label and school_year == current_school_year_label:
+        if live_accreditation.is_file():
+            candidates.append(live_accreditation)
+        if pull_accreditation is not None and pull_accreditation.is_file():
+            candidates.append(pull_accreditation)
+        if archive_accreditation is not None and archive_accreditation.is_file():
+            candidates.append(archive_accreditation)
+    elif school_year:
+        if pull_accreditation is not None and pull_accreditation.is_file():
+            candidates.append(pull_accreditation)
+        if archive_accreditation is not None and archive_accreditation.is_file():
+            candidates.append(archive_accreditation)
+    elif live_accreditation.is_file():
+        candidates.append(live_accreditation)
+    for path in candidates:
+        return path.resolve()
+    return None
+
+
+def load_final_goal_achievement_student_ids(workbook_path: Path) -> set[str]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if DRILLDOWN_SHEET_NAME not in workbook.sheetnames:
+            return set()
+        worksheet = workbook[DRILLDOWN_SHEET_NAME]
+        header_row: list[str] | None = None
+        header_index = -1
+        for row_number, row in enumerate(
+            worksheet.iter_rows(values_only=True, max_row=10),
+            start=1,
+        ):
+            normalized = [_normalize_header_cell(value) for value in row]
+            if STUDENT_ID_COLUMN in normalized and FINAL_GOAL_ACHIEVEMENT_COLUMN in normalized:
+                header_row = normalized
+                header_index = row_number
+                break
+        if header_row is None:
+            return set()
+        student_index = header_row.index(STUDENT_ID_COLUMN)
+        achievement_index = header_row.index(FINAL_GOAL_ACHIEVEMENT_COLUMN)
+        completed: set[str] = set()
+        for row in worksheet.iter_rows(min_row=header_index + 1, values_only=True):
+            if not row or not any(row):
+                continue
+            if student_index >= len(row) or achievement_index >= len(row):
+                continue
+            student_id = clean_value(
+                str(row[student_index]) if row[student_index] is not None else None
+            )
+            achievement = clean_value(
+                str(row[achievement_index]) if row[achievement_index] is not None else None
+            )
+            if student_id and achievement and achievement.lower() == "yes":
+                completed.add(student_id)
+        return completed
+    finally:
+        workbook.close()
+
+
+def resolve_final_goal_achievement_students(school_year: str | None) -> set[str] | None:
+    workbook = resolve_accreditation_workbook_for_school_year(school_year)
+    if workbook is None:
+        return None
+    return load_final_goal_achievement_student_ids(workbook)
+
+
+def default_goal_achievement_datasets_dir() -> Path:
+    explicit = (os.environ.get("GOAL_ACHIEVEMENT_DATASETS_DIR") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    cis_root = _default_cisiphyus_root().parent.parent
+    return cis_root / "data" / "datasets" / "Goal Achievement"
+
+
+def resolve_goal_progress_workbook(school_year: str | None) -> Path | None:
+    if not school_year:
+        return None
+    archives_dir = default_archives_dir()
+    repo_root = _default_cisiphyus_root()
+    candidates = [
+        archives_dir
+        / school_year
+        / "pulls"
+        / "goal_progress"
+        / "raw.xlsx",
+        archives_dir
+        / school_year
+        / "pulls"
+        / "goal_tracking_student_goals"
+        / "raw.xlsx",
+        default_goal_achievement_datasets_dir()
+        / GOAL_PROGRESS_FILENAME_TEMPLATE.format(school_year=school_year),
+    ]
+    current = current_school_year()
+    if current and school_year == current:
+        candidates.insert(
+            0,
+            repo_root / "artifacts" / "latest" / "goal_tracking_student_goals" / "raw.xlsx",
+        )
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    return None
+
+
+def _goal_progress_worksheet_names(workbook: Any) -> list[str]:
+    if GOAL_PROGRESS_SHEET in workbook.sheetnames:
+        return [GOAL_PROGRESS_SHEET]
+    return list(workbook.sheetnames)
+
+
+def load_goal_achievement_values_by_student(workbook_path: Path) -> dict[str, set[str]]:
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        for sheet_name in _goal_progress_worksheet_names(workbook):
+            worksheet = workbook[sheet_name]
+            header_row: list[str] | None = None
+            header_index = -1
+            for row_number, row in enumerate(
+                worksheet.iter_rows(values_only=True, max_row=10),
+                start=1,
+            ):
+                normalized = [_normalize_header_cell(value) for value in row]
+                if "Student ID" in normalized and "Goal Achievement" in normalized:
+                    header_row = normalized
+                    header_index = row_number
+                    break
+            if header_row is None:
+                continue
+            student_index = header_row.index("Student ID")
+            achievement_index = header_row.index("Goal Achievement")
+            by_student: dict[str, set[str]] = defaultdict(set)
+            for row in worksheet.iter_rows(min_row=header_index + 1, values_only=True):
+                if not row or not any(row):
+                    continue
+                if student_index >= len(row) or achievement_index >= len(row):
+                    continue
+                student_id = clean_value(
+                    str(row[student_index]) if row[student_index] is not None else None
+                )
+                if not student_id:
+                    continue
+                achievement = clean_value(
+                    str(row[achievement_index]) if row[achievement_index] is not None else None
+                )
+                if achievement:
+                    by_student[student_id].add(achievement)
+            if by_student:
+                return dict(by_student)
+        return {}
+    finally:
+        workbook.close()
+
+
+def ewgspe_only_student_ids(goal_achievement_by_student: dict[str, set[str]]) -> set[str]:
+    excluded: set[str] = set()
+    for student_id, values in goal_achievement_by_student.items():
+        if not values:
+            continue
+        if values <= {GOAL_ACHIEVEMENT_EWGSPE}:
+            excluded.add(student_id)
+    return excluded
+
+
+def resolve_ewgspe_only_student_ids(
+    school_year: str | None,
+    *,
+    goal_progress_workbook: Path | None = None,
+) -> set[str]:
+    workbook = goal_progress_workbook or resolve_goal_progress_workbook(school_year)
+    if workbook is None:
+        return set()
+    return ewgspe_only_student_ids(load_goal_achievement_values_by_student(workbook))
+
+
+def _normalize_school_name(value: str | None) -> str:
+    if value is None:
+        return ""
+    return " ".join(value.lower().replace("&", " and ").split())
+
+
+def district_key_for_school(school: str | None) -> str | None:
+    if not school:
+        return None
+    if school in SCHOOL_TO_DISTRICT:
+        return SCHOOL_TO_DISTRICT[school]
+    normalized = _normalize_school_name(school)
+    for site, district in SCHOOL_TO_DISTRICT.items():
+        if _normalize_school_name(site) == normalized:
+            return district
+    return None
+
+
+def is_attendance_only_district(school: str | None) -> bool:
+    district = district_key_for_school(school)
+    return district in ATTENDANCE_ONLY_DISTRICT_KEYS
+
+
 def resolve_archived_metrics_workbook(school_year: str) -> Path | None:
     archives_dir = default_archives_dir()
-    period_dir = archives_dir / school_year / ARCHIVE_PERIOD
-    if period_dir.is_dir():
-        found = _find_metrics_workbook(period_dir)
-        if found is not None:
-            return found
     pull_path = (
         archives_dir
         / school_year
@@ -192,6 +424,24 @@ def resolve_archived_metrics_workbook(school_year: str) -> Path | None:
     )
     if pull_path.is_file():
         return pull_path.resolve()
+    try:
+        src_dir = _default_cisiphyus_root() / "src"
+        if str(src_dir) not in sys.path:
+            sys.path.insert(0, str(src_dir))
+        import config
+
+        programs = config.load_school_year_programs(config.REPORTS_PATH)
+        if school_year == config.default_school_year(programs):
+            latest_raw = config.latest_raw_path(CISIPHYUS_REPORT_ID)
+            if latest_raw.is_file():
+                return latest_raw.resolve()
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    period_dir = archives_dir / school_year / ARCHIVE_PERIOD
+    if period_dir.is_dir():
+        found = _find_metrics_workbook(period_dir)
+        if found is not None:
+            return found
     year_dir = archives_dir / school_year
     if year_dir.is_dir():
         for child in sorted(year_dir.iterdir()):
@@ -300,9 +550,13 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-def _cisiphyus_cmd(cisiphyus_root: Path, school_year: str | None = None) -> list[str]:
+def _cisiphyus_cmd(
+    cisiphyus_root: Path,
+    report_id: str,
+    school_year: str | None = None,
+) -> list[str]:
     run_py = cisiphyus_root / "run.py"
-    cmd: list[str] = [sys.executable, str(run_py), "pull", CISIPHYUS_REPORT_ID]
+    cmd: list[str] = [sys.executable, str(run_py), "pull", report_id]
     headed = _flag_true(
         _env_first("AUDIT_CISPHYUS_HEADED", "CISPHYUS_HEADED")
     )
@@ -313,7 +567,11 @@ def _cisiphyus_cmd(cisiphyus_root: Path, school_year: str | None = None) -> list
     return cmd
 
 
-def _cisiphyus_raw_path(cisiphyus_root: Path, school_year: str | None = None) -> Path:
+def _cisiphyus_raw_path(
+    cisiphyus_root: Path,
+    report_id: str,
+    school_year: str | None = None,
+) -> Path:
     if school_year:
         src_dir = cisiphyus_root / "src"
         if str(src_dir) not in sys.path:
@@ -323,13 +581,14 @@ def _cisiphyus_raw_path(cisiphyus_root: Path, school_year: str | None = None) ->
         programs = config.load_school_year_programs(config.REPORTS_PATH)
         default_sy = config.default_school_year(programs)
         if default_sy and school_year != default_sy:
-            return config.archives_raw_path(school_year, CISIPHYUS_REPORT_ID)
-    return cisiphyus_root / "artifacts" / "latest" / CISIPHYUS_REPORT_ID / "raw.xlsx"
+            return config.archives_raw_path(school_year, report_id)
+    return cisiphyus_root / "artifacts" / "latest" / report_id / "raw.xlsx"
 
 
 def _run_cisiphyus_export(
     *,
     cisiphyus_root: Path,
+    report_id: str,
     school_year: str | None = None,
     run: Callable[..., Any],
 ) -> Path:
@@ -338,18 +597,18 @@ def _run_cisiphyus_export(
         raise FileNotFoundError(f"cisiphyus run.py not found at {run_py}")
 
     completed = run(
-        _cisiphyus_cmd(cisiphyus_root, school_year=school_year),
+        _cisiphyus_cmd(cisiphyus_root, report_id, school_year=school_year),
         cwd=str(cisiphyus_root),
         check=False,
         env=os.environ.copy(),
     )
     if getattr(completed, "returncode", 1) != 0:
         raise RuntimeError(
-            f"cisiphyus {CISIPHYUS_REPORT_ID} failed with exit code "
+            f"cisiphyus {report_id} failed with exit code "
             f"{getattr(completed, 'returncode', 'unknown')}"
         )
 
-    raw = _cisiphyus_raw_path(cisiphyus_root, school_year=school_year)
+    raw = _cisiphyus_raw_path(cisiphyus_root, report_id, school_year=school_year)
     if not raw.is_file():
         raise FileNotFoundError(f"expected cisiphyus output missing: {raw}")
     return raw
@@ -365,6 +624,27 @@ def fetch_student_metrics_workbook(
 ) -> FetchResult:
     """Fetch student metrics summary from CISDM when missing, stale, or forced."""
     target = (destination or preferred_student_metrics_workbook()).resolve()
+    return fetch_cisiphyus_workbook(
+        report_id=CISIPHYUS_REPORT_ID,
+        destination=target,
+        force_fetch=force_fetch,
+        require_fresh=require_fresh,
+        school_year=school_year,
+        run=run,
+    )
+
+
+def fetch_cisiphyus_workbook(
+    *,
+    report_id: str,
+    destination: Path,
+    force_fetch: bool = False,
+    require_fresh: bool = False,
+    school_year: str | None = None,
+    run: Callable[..., Any] = subprocess.run,
+) -> FetchResult:
+    """Fetch a CISiphyus report export when missing, stale, or forced."""
+    target = destination.resolve()
     env_force = _flag_true(os.environ.get("AUDIT_FETCH_FROM_CISDM"))
     should_fetch, reason = _fetch_reason(destination=target, force_fetch=force_fetch or env_force)
 
@@ -389,6 +669,7 @@ def fetch_student_metrics_workbook(
     try:
         raw = _run_cisiphyus_export(
             cisiphyus_root=cisiphyus_root,
+            report_id=report_id,
             school_year=school_year,
             run=run,
         )
@@ -400,13 +681,12 @@ def fetch_student_metrics_workbook(
             if freshness.get("is_stale"):
                 age = freshness.get("workbook_age_hours")
                 raise RuntimeError(
-                    "stale_student_metrics_workbook_after_refresh: "
-                    f"path={target} workbook_age_hours={age} "
-                    f"max_age_hours={freshness.get('max_age_hours')}"
+                    f"stale_workbook_after_refresh: report={report_id} path={target} "
+                    f"workbook_age_hours={age} max_age_hours={freshness.get('max_age_hours')}"
                 )
 
         print(
-            f"[audit] refreshed workbook ({reason}) -> {target}",
+            f"[audit] refreshed {report_id} workbook ({reason}) -> {target}",
             file=sys.stderr,
         )
         return FetchResult(
@@ -422,10 +702,10 @@ def fetch_student_metrics_workbook(
             freshness = workbook_freshness(target)
             if freshness.get("is_stale"):
                 raise RuntimeError(
-                    f"stale_student_metrics_workbook_after_failed_refresh: {exc}"
+                    f"stale_workbook_after_failed_refresh: report={report_id} {exc}"
                 ) from exc
         print(
-            f"[audit] refresh failed ({reason}): {exc}",
+            f"[audit] refresh failed ({report_id}, {reason}): {exc}",
             file=sys.stderr,
         )
         if not target.exists():
@@ -436,6 +716,23 @@ def fetch_student_metrics_workbook(
             succeeded=False,
             reason=reason,
         )
+
+
+def fetch_goal_progress_workbook(
+    *,
+    destination: Path,
+    force_fetch: bool = False,
+    school_year: str | None = None,
+    run: Callable[..., Any] = subprocess.run,
+) -> FetchResult:
+    """Fetch goal tracking student goals export from CISDM when missing, stale, or forced."""
+    return fetch_cisiphyus_workbook(
+        report_id=GOAL_TRACKING_REPORT_ID,
+        destination=destination,
+        force_fetch=force_fetch,
+        school_year=school_year,
+        run=run,
+    )
 
 # --- load workbook ---
 
@@ -548,6 +845,67 @@ PRIMARY_GOAL_METRIC_BY_DOMAIN: dict[str, str] = {
     "Academics": "GPA",
 }
 
+GOAL_ACHIEVEMENT_EWGSPE = "Exited Within Same Grading Period Enrolled"
+GOAL_PROGRESS_SHEET = "CIS_StudentProgress_Detail"
+GOAL_PROGRESS_HEADER_ROW = 3
+GOAL_PROGRESS_FILENAME_TEMPLATE = "{school_year}_GoalAchievement.xlsx"
+
+# ponytail: attendance-only ABCS scope for these district keys (Jon Irons, SY25-26)
+ATTENDANCE_ONLY_DISTRICT_KEYS = frozenset({"Pocono", "SE Delco"})
+
+SCHOOL_TO_DISTRICT: dict[str, str] = {
+    "Octorara Junior and Senior High School": "Octorara",
+    "Freemansburg Elementary School": "Bethlehem",
+    "10th & Penn": "Reading",
+    "Stony Creek Elementary": "Antietam",
+    "Tyson-Schoener Elementary": "Reading",
+    "Broughal Middle School": "Bethlehem",
+    "Fountain Hill Elementary School": "Bethlehem",
+    "Mosser Elementary School": "Allentown",
+    "Sharon Hill School": "SE Delco",
+    "Delcroft School": "SE Delco",
+    "Southwest Middle School": "Reading",
+    "Darby Township School": "SE Delco",
+    "Wilson Area Intermediate School": "Wilson Area",
+    "Northwestern Lehigh High School": "Northwestern Lehigh",
+    "Fleetwood Area Middle School": "Fleetwood",
+    "Southern Middle School": "Reading",
+    "Clear Run Elementary Center": "Pocono",
+    "Pocono Mountain West Junior High School": "Pocono",
+    "Harrison Morton Middle School": "Allentown",
+    "Octorara Intermediate School": "Octorara",
+    "Harris School": "SE Delco",
+    "Northeast Middle School": "Bethlehem",
+    "Fleetwood High School": "Fleetwood",
+    "Trexler Middle School": "Allentown",
+    "Eyer Middle School": "East Penn",
+    "Clear Run Intermediate School": "Pocono",
+    "South Mountain Middle School": "Allentown",
+    "Lincoln Leadership Academy": "LLA",
+    "Whitehall-Coplay Middle School": "Whitehall",
+    "Academy Park High School": "SE Delco",
+    "Avon Grove Intermediate School": "Avon Grove",
+    "Pocono Mountain West High School": "Pocono",
+    "Avon Grove High School": "Avon Grove",
+    "Freedom High School": "Bethlehem",
+    "Easton Area Middle School": "Easton",
+    "Lehigh Career & Technical Institute": "LCTI",
+    "Liberty High School": "Bethlehem",
+    "Easton Area High School": "Easton",
+    "Emmaus High School": "East Penn",
+    "William Allen High School": "Allentown",
+    "Reading High School": "Reading",
+}
+
+STUDENT_COMPLETENESS_ISSUE_CODES = frozenset(
+    {
+        "abc_baselines_incomplete",
+        "abc_target_missing",
+        "attendance_baseline_missing",
+        "attendance_target_missing",
+    }
+)
+
 METRIC_DOMAIN_OVERRIDES: dict[str, frozenset[str]] = {
     "Attendance Rate (%)": frozenset({"Attendance"}),
     "Attendance Rate (days absent)": frozenset({"Attendance"}),
@@ -584,6 +942,25 @@ METRIC_DOMAIN_OVERRIDES: dict[str, frozenset[str]] = {
     "Accepted to one or more colleges/universities": frozenset({"College Readiness"}),
     "Other College Readiness": frozenset({"College Readiness"}),
 }
+
+# WHY: Improve Attendance goals may allow one unit of slack (e.g. one extra tardy)
+ATTENDANCE_GOAL_PERMISSIVE_METRICS = frozenset(
+    {
+        "Attendance Rate (%)",
+        "Tardies",
+    }
+)
+ATTENDANCE_GOAL_PERMISSIVE_SLACK = 1.0
+
+
+def attendance_goal_permissive_slack(metric: str | None, goal: str | None) -> float:
+    if goal_domain(goal) != "Attendance":
+        return 0.0
+    metric_name = clean_value(metric)
+    if metric_name in ATTENDANCE_GOAL_PERMISSIVE_METRICS:
+        return ATTENDANCE_GOAL_PERMISSIVE_SLACK
+    return 0.0
+
 
 GRADE_SCALE: frozenset[str] = frozenset(
     {"F", "D-", "D", "D+", "C-", "C", "C+", "B-", "B", "B+", "A-", "A", "A+"}
@@ -782,6 +1159,10 @@ def metric_scale(metric: str | None) -> str | None:
 
 
 def metric_direction(metric: str | None) -> Direction:
+    metric_name = clean_value(metric)
+    # WHY: CISDM mixes rate and days-absent semantics; direction check is unreliable here
+    if metric_name == "Attendance Rate (days absent)":
+        return "none"
     scale = metric_scale(metric)
     if scale in {"boolean", "engagement_text", "reading_level"}:
         return "none"
@@ -840,11 +1221,13 @@ def _numeric_direction_ok(
     baseline: float,
     target: float,
     direction: Direction,
+    *,
+    permissive_slack: float = 0.0,
 ) -> bool:
     if direction == "higher_is_better":
-        return target > baseline
+        return target >= baseline - permissive_slack
     if direction == "lower_is_better":
-        return target < baseline
+        return target <= baseline + permissive_slack
     return True
 
 
@@ -858,9 +1241,9 @@ def _grade_direction_ok(
     if baseline_rank is None or target_rank is None:
         return True
     if direction == "higher_is_better":
-        return target_rank > baseline_rank
+        return target_rank >= baseline_rank
     if direction == "lower_is_better":
-        return target_rank < baseline_rank
+        return target_rank <= baseline_rank
     return True
 
 
@@ -868,6 +1251,7 @@ def baseline_target_direction_mismatch(
     metric: str | None,
     baseline: str | None,
     target: str | None,
+    goal: str | None = None,
 ) -> bool:
     direction = metric_direction(metric)
     if direction == "none":
@@ -880,7 +1264,13 @@ def baseline_target_direction_mismatch(
     baseline_num = parse_number(baseline_text)
     target_num = parse_number(target_text)
     if baseline_num is not None and target_num is not None:
-        return not _numeric_direction_ok(baseline_num, target_num, direction)
+        slack = attendance_goal_permissive_slack(metric, goal)
+        return not _numeric_direction_ok(
+            baseline_num,
+            target_num,
+            direction,
+            permissive_slack=slack,
+        )
 
     baseline_grade = normalize_grade(baseline_text)
     target_grade = normalize_grade(target_text)
@@ -922,7 +1312,8 @@ def analyze_record(record: RowRecord) -> dict[str, object]:
     if has_undocumented_annotation(metric_str, target_str):
         issue_codes.append("undocumented_value_annotation")
 
-    if baseline_target_direction_mismatch(metric_str, baseline_str, target_str):
+    goal_str = str(goal) if goal is not None else None
+    if baseline_target_direction_mismatch(metric_str, baseline_str, target_str, goal=goal_str):
         issue_codes.append("baseline_target_direction_mismatch")
 
     return {
@@ -947,33 +1338,31 @@ FLAG_DESCRIPTIONS: dict[str, str] = {
     "both_blank_with_two_progress_reports": "Both blank but two or more grading periods filled",
     "target_without_baseline": "Target set without baseline",
     "baseline_without_target": "Baseline set without target",
-    "baseline_without_target_non_goal_context": (
-        "Primary goal metric missing target (ABC domain not set up)"
+    "baseline_without_target_supplemental_metric": (
+        "Baseline without target (non-goal metric — student has another complete goal)"
     ),
-    "baseline_without_target_no_goal_context": (
-        "Baseline without target (no ABC goals set yet — accepted)"
+    "target_without_baseline_supplemental_metric": (
+        "Target without baseline (non-goal metric — student has another complete goal)"
     ),
     "baseline_without_target_domain_tracking": (
         "Baseline without target (supplemental metric — domain goal already set)"
     ),
-    "baseline_without_target_supplemental_metric": (
-        "Baseline without target (supplemental metric — no target required)"
-    ),
-    "target_without_baseline_non_goal_context": (
-        "Primary goal metric missing baseline (ABC domain not set up)"
-    ),
-    "target_without_baseline_no_goal_context": (
-        "Target without baseline (no ABC goals set yet — accepted)"
+    "baseline_without_target_no_goal_context": (
+        "Baseline without target (no ABC goals set yet — accepted)"
     ),
     "target_without_baseline_domain_tracking": (
         "Target without baseline (supplemental metric — domain goal already set)"
     ),
-    "target_without_baseline_supplemental_metric": (
-        "Target without baseline (supplemental metric — no baseline required)"
+    "target_without_baseline_no_goal_context": (
+        "Target without baseline (no ABC goals set yet — accepted)"
     ),
     "duplicate_composite_key": "Duplicate Student ID+School+Goal+Metric row",
     "student_client_id_mismatch": "Student ID maps to multiple Client IDs",
     "case_manager_blank": "Case Manager is blank",
+    "abc_baselines_incomplete": "Student missing one or more ABC goal baselines",
+    "abc_target_missing": "Student missing target on all ABC goals",
+    "attendance_baseline_missing": "Attendance-only district: attendance baseline missing",
+    "attendance_target_missing": "Attendance-only district: attendance target missing",
 }
 
 ACCEPTED_ISSUE_CODES = frozenset(
@@ -989,8 +1378,8 @@ ACCEPTED_ISSUE_CODES = frozenset(
 
 PARTIAL_METRIC_ISSUE_CODES = frozenset(
     {
-        "baseline_without_target_non_goal_context",
-        "target_without_baseline_non_goal_context",
+        "baseline_without_target",
+        "target_without_baseline",
     }
 )
 
@@ -1040,6 +1429,9 @@ ACCEPTED_EXPORT_SPECS: tuple[tuple[str, frozenset[str], str], ...] = (
 class AuditConfig:
     sheet_name: str = DEFAULT_SHEET
     include_ok_rows: bool = False
+    school_year: str | None = None
+    goal_progress_workbook: Path | None = None
+    excluded_student_ids: set[str] | None = None
 
 
 def _text(record: RowRecord, field: str) -> str | None:
@@ -1065,6 +1457,13 @@ def baseline_target_status(record: RowRecord) -> str:
 
 ProgressStatus = Literal["on_track", "off_track", "no_progress_data", "indeterminate"]
 PROGRESS_STATUS_ORDER = ("on_track", "off_track", "no_progress_data", "indeterminate")
+
+
+def latest_metric_value(record: RowRecord) -> str | None:
+    latest = clean_value(_text(record, "Latest Progress"))
+    if latest is not None:
+        return latest
+    return latest_grading_period_value(record)
 
 
 def latest_grading_period_value(record: RowRecord) -> str | None:
@@ -1200,6 +1599,187 @@ def student_metric_context(record: RowRecord) -> tuple[str, str]:
     )
 
 
+EXCLUDED_ENROLLMENT_STATUSES = frozenset({"exited"})
+
+
+def filter_records_excluding_students(
+    records: list[RowRecord],
+    excluded_student_ids: set[str],
+) -> tuple[list[RowRecord], int]:
+    if not excluded_student_ids:
+        return records, 0
+    kept: list[RowRecord] = []
+    excluded_rows = 0
+    for record in records:
+        student_id = clean_value(_text(record, "Student ID")) or ""
+        if student_id in excluded_student_ids:
+            excluded_rows += 1
+        else:
+            kept.append(record)
+    return kept, excluded_rows
+
+
+def student_abc_domains_with_baseline(
+    records: list[RowRecord],
+    *,
+    student_id: str,
+    school_year: str,
+) -> set[str]:
+    domains: set[str] = set()
+    for record in records:
+        sid, year = student_metric_context(record)
+        if sid != student_id or year != school_year:
+            continue
+        domain = record_abc_domain(record)
+        if domain is None or is_blank(_text(record, "Baseline")):
+            continue
+        domains.add(domain)
+    return domains
+
+
+def student_abc_domains_with_target(
+    records: list[RowRecord],
+    *,
+    student_id: str,
+    school_year: str,
+    domains: frozenset[str],
+) -> set[str]:
+    with_target: set[str] = set()
+    for record in records:
+        sid, year = student_metric_context(record)
+        if sid != student_id or year != school_year:
+            continue
+        domain = record_abc_domain(record)
+        if domain is None or domain not in domains or is_blank(_text(record, "Target")):
+            continue
+        with_target.add(domain)
+    return with_target
+
+
+def _group_records_by_student(records: list[RowRecord]) -> dict[tuple[str, str], list[RowRecord]]:
+    grouped: dict[tuple[str, str], list[RowRecord]] = defaultdict(list)
+    for record in records:
+        student_id, school_year = student_metric_context(record)
+        if student_id:
+            grouped[(student_id, school_year)].append(record)
+    return grouped
+
+
+def _audit_student_abc_completeness(
+    records: list[RowRecord],
+    *,
+    issue_codes: Counter[str],
+    detail_map: dict[int, list[str]],
+) -> int:
+    flagged_students = 0
+    for (student_id, school_year), student_records in _group_records_by_student(records).items():
+        del student_id, school_year
+        anchor = min(student_records, key=row_number)
+        school = clean_value(_text(anchor, "School"))
+        attendance_only = is_attendance_only_district(school)
+        required_domains = (
+            frozenset({"Attendance"}) if attendance_only else ABC_DOMAINS
+        )
+        sid, year = student_metric_context(anchor)
+        baselines = student_abc_domains_with_baseline(
+            records,
+            student_id=sid,
+            school_year=year,
+        )
+        targets = student_abc_domains_with_target(
+            records,
+            student_id=sid,
+            school_year=year,
+            domains=required_domains,
+        )
+        missing_baselines = required_domains - baselines
+        codes: list[str] = []
+        if missing_baselines:
+            if attendance_only:
+                codes.append("attendance_baseline_missing")
+            else:
+                codes.append("abc_baselines_incomplete")
+        if not targets:
+            if attendance_only:
+                codes.append("attendance_target_missing")
+            else:
+                codes.append("abc_target_missing")
+        if codes:
+            for code in codes:
+                issue_codes[code] += 1
+                detail_map[row_number(anchor)].append(code)
+            flagged_students += 1
+    return flagged_students
+
+
+def is_audit_eligible_record(
+    record: RowRecord,
+    *,
+    final_goal_achievement_students: set[str] | None = None,
+) -> bool:
+    status = clean_value(_text(record, "Enrollment Status"))
+    if not status or status.lower() not in EXCLUDED_ENROLLMENT_STATUSES:
+        return True
+    if final_goal_achievement_students is None:
+        return False
+    student_id = clean_value(_text(record, "Student ID")) or ""
+    return student_id in final_goal_achievement_students
+
+
+def filter_audit_records(
+    records: list[RowRecord],
+    *,
+    final_goal_achievement_students: set[str] | None = None,
+    apply_exited_filter: bool = True,
+) -> tuple[list[RowRecord], int, int]:
+    if not apply_exited_filter:
+        return records, 0, 0
+    kept: list[RowRecord] = []
+    excluded = 0
+    included_exited = 0
+    for record in records:
+        if is_audit_eligible_record(
+            record,
+            final_goal_achievement_students=final_goal_achievement_students,
+        ):
+            kept.append(record)
+            status = clean_value(_text(record, "Enrollment Status"))
+            if status and status.lower() in EXCLUDED_ENROLLMENT_STATUSES:
+                included_exited += 1
+        else:
+            excluded += 1
+    return kept, excluded, included_exited
+
+
+def is_closed_school_year(school_year: str | None) -> bool:
+    if not school_year:
+        return False
+    current = current_school_year()
+    return current is not None and school_year != current
+
+
+def enrollment_filter_plan(
+    school_year: str | None,
+    *,
+    final_goal_achievement_students: set[str] | None,
+) -> tuple[bool, set[str] | None]:
+    # WHY: closed-year re-pulls mark nearly everyone Exited; year export is the scope
+    if is_closed_school_year(school_year):
+        return False, None
+    if final_goal_achievement_students is not None:
+        return True, final_goal_achievement_students
+    if should_exclude_exited_students(school_year):
+        return True, None
+    return False, None
+
+
+def should_exclude_exited_students(school_year: str | None) -> bool:
+    if not school_year:
+        return False
+    current = current_school_year()
+    return current is not None and school_year == current
+
+
 def record_abc_domain(record: RowRecord) -> str | None:
     goal = clean_value(_text(record, "Goal"))
     if goal is None:
@@ -1245,31 +1825,16 @@ def _partial_metric_disposition(
     *,
     status: str,
     complete_student_contexts: set[tuple[str, str]],
-    complete_domain_contexts: set[tuple[str, str, str]],
-    students_with_abc_complete: set[tuple[str, str]],
 ) -> tuple[str | None, str | None]:
     """Return (issue_code, accepted_code) for baseline_only / target_only rows."""
     student_id, school_year = student_metric_context(record)
-    domain = record_abc_domain(record)
     if not student_id:
         return None, None
 
-    issue_prefix = "baseline_without_target" if status == "baseline_only" else "target_without_baseline"
-
-    if domain is not None:
-        domain_ctx = (student_id, school_year, domain)
-        if domain_ctx in complete_domain_contexts:
-            return None, f"{issue_prefix}_domain_tracking"
-        if (student_id, school_year) not in students_with_abc_complete:
-            return None, f"{issue_prefix}_no_goal_context"
-        if is_primary_goal_metric(record):
-            return f"{issue_prefix}_non_goal_context", None
-        return None, f"{issue_prefix}_supplemental_metric"
-
-    student_ctx = (student_id, school_year)
-    if student_ctx in complete_student_contexts:
-        return f"{issue_prefix}_non_goal_context", None
-    return None, f"{issue_prefix}_no_goal_context"
+    issue_code = "baseline_without_target" if status == "baseline_only" else "target_without_baseline"
+    if (student_id, school_year) in complete_student_contexts:
+        return None, f"{issue_code}_supplemental_metric"
+    return issue_code, None
 
 
 def student_contexts_with_complete_metric(records: list[RowRecord]) -> set[tuple[str, str]]:
@@ -1395,8 +1960,6 @@ def _audit_baseline_target_flags(
     records: list[RowRecord],
     *,
     complete_student_contexts: set[tuple[str, str]],
-    complete_domain_contexts: set[tuple[str, str, str]],
-    students_with_abc_complete: set[tuple[str, str]],
     sink: IssueSink,
     accepted_sink: AcceptedSink,
 ) -> None:
@@ -1413,8 +1976,6 @@ def _audit_baseline_target_flags(
                 record,
                 status=status,
                 complete_student_contexts=complete_student_contexts,
-                complete_domain_contexts=complete_domain_contexts,
-                students_with_abc_complete=students_with_abc_complete,
             )
             if issue_code:
                 flags.append(issue_code)
@@ -1446,29 +2007,13 @@ def _build_detail_rows(
     ]
 
 
-def _partial_metric_contexts(
-    records: list[RowRecord],
-) -> tuple[
-    set[tuple[str, str]],
-    set[tuple[str, str, str]],
-    set[tuple[str, str]],
-]:
-    return (
-        student_contexts_with_complete_metric(records),
-        student_domains_with_complete_metric(records),
-        students_with_any_abc_complete(records),
-    )
-
-
 def _scan_partial_metric_dispositions(
     records: list[RowRecord],
 ) -> tuple[Counter[str], Counter[str]]:
     """Independent row scan of partial-metric issue and accepted codes."""
     issue_counts: Counter[str] = Counter()
     accepted_counts: Counter[str] = Counter()
-    complete_student_contexts, complete_domain_contexts, students_with_abc_complete = (
-        _partial_metric_contexts(records)
-    )
+    complete_student_contexts = student_contexts_with_complete_metric(records)
     for record in records:
         status = baseline_target_status(record)
         if status not in {"baseline_only", "target_only"}:
@@ -1477,8 +2022,6 @@ def _scan_partial_metric_dispositions(
             record,
             status=status,
             complete_student_contexts=complete_student_contexts,
-            complete_domain_contexts=complete_domain_contexts,
-            students_with_abc_complete=students_with_abc_complete,
         )
         if issue_code:
             issue_counts[issue_code] += 1
@@ -1495,9 +2038,7 @@ def _scan_partial_metric_dispositions_for_status(
     status: str,
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
-    complete_student_contexts, complete_domain_contexts, students_with_abc_complete = (
-        _partial_metric_contexts(records)
-    )
+    complete_student_contexts = student_contexts_with_complete_metric(records)
     for record in records:
         if baseline_target_status(record) != status:
             continue
@@ -1505,8 +2046,6 @@ def _scan_partial_metric_dispositions_for_status(
             record,
             status=status,
             complete_student_contexts=complete_student_contexts,
-            complete_domain_contexts=complete_domain_contexts,
-            students_with_abc_complete=students_with_abc_complete,
         )
         counts[issue_code or accepted_code or "__missing_partial_disposition__"] += 1
     return counts
@@ -1572,14 +2111,10 @@ def reconcile_audit_counts(
 
     supplemental_excluded = accepted_baseline_supplemental_exclusions(accepted_counts)
     excl = baseline_without_target_excl_supplemental(distribution, accepted_counts)
-    flagged_baseline = int(issue_counts.get("baseline_without_target_non_goal_context", 0) or 0)
-    no_goal_baseline = int(
-        accepted_counts.get("baseline_without_target_no_goal_context", 0) or 0
-    )
-    if excl != flagged_baseline + no_goal_baseline:
+    flagged_baseline = int(issue_counts.get("baseline_without_target", 0) or 0)
+    if excl != flagged_baseline:
         errors.append(
-            f"baseline excl supplemental={excl} != flagged={flagged_baseline} "
-            f"+ no_abc_goals={no_goal_baseline}"
+            f"baseline excl supplemental={excl} != flagged={flagged_baseline}"
         )
     if excl + supplemental_excluded != raw_baseline:
         errors.append(
@@ -1634,11 +2169,26 @@ def reconcile_audit_counts(
         "baseline_without_target_excl_supplemental": excl,
         "baseline_supplemental_excluded": supplemental_excluded,
         "baseline_flagged_primary": flagged_baseline,
-        "baseline_no_abc_goals": no_goal_baseline,
     }
 
 
-def run_audit(records: list[RowRecord]) -> dict[str, Any]:
+def run_audit(
+    records: list[RowRecord],
+    *,
+    school_year: str | None = None,
+    excluded_student_ids: set[str] | None = None,
+    goal_progress_workbook: Path | None = None,
+    final_goal_achievement_students: set[str] | None = None,
+) -> dict[str, Any]:
+    del final_goal_achievement_students  # ponytail: legacy kwarg; EWGSPE scope replaced GA drilldown
+    resolved_excluded = excluded_student_ids
+    if resolved_excluded is None and school_year is not None:
+        resolved_excluded = resolve_ewgspe_only_student_ids(
+            school_year,
+            goal_progress_workbook=goal_progress_workbook,
+        )
+    excluded = resolved_excluded or set()
+    records, ewgspe_rows_excluded = filter_records_excluding_students(records, excluded)
     summary: Counter[str] = Counter()
     issue_codes: Counter[str] = Counter()
     detail_map: dict[int, list[str]] = defaultdict(list)
@@ -1653,11 +2203,17 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     key_info = audit_composite_keys(records)
     client_info = audit_student_client_ids(records)
     complete_student_contexts = student_contexts_with_complete_metric(records)
-    complete_domain_contexts = student_domains_with_complete_metric(records)
-    students_with_abc_complete = students_with_any_abc_complete(records)
     bt = audit_baseline_target(records)
 
     summary["rows"] = len(records)
+    summary["ewgspe_only_students_excluded"] = len(excluded)
+    summary["rows_excluded_ewgspe_students"] = ewgspe_rows_excluded
+    summary["exited_rows_excluded"] = 0
+    summary["exited_rows_included_with_final_goal_achievement"] = 0
+    if school_year is not None:
+        summary["enrollment_filter"] = "all_students_except_ewgspe_only"
+    else:
+        summary["enrollment_filter"] = "all_rows"
     summary["duplicate_composite_keys"] = key_info["duplicate_count"]
     summary["student_client_id_conflicts"] = client_info["student_ids_with_multiple_client_ids"]
     for key, value in bt.items():
@@ -1673,15 +2229,24 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
     _audit_baseline_target_flags(
         records,
         complete_student_contexts=complete_student_contexts,
-        complete_domain_contexts=complete_domain_contexts,
-        students_with_abc_complete=students_with_abc_complete,
         sink=sink,
         accepted_sink=accepted_sink,
     )
     _audit_domain_scale_checks(records, sink)
+    student_completeness_codes: Counter[str] = Counter()
+    student_completeness_map: dict[int, list[str]] = defaultdict(list)
+    if school_year is not None:
+        summary["student_completeness_flagged"] = _audit_student_abc_completeness(
+            records,
+            issue_codes=student_completeness_codes,
+            detail_map=student_completeness_map,
+        )
+    else:
+        summary["student_completeness_flagged"] = 0
 
     detail_rows = _build_detail_rows(records, detail_map)
     accepted_detail_rows = _build_detail_rows(records, accepted_detail_map)
+    student_completeness_rows = _build_detail_rows(records, student_completeness_map)
     summary["accepted_exception_rows"] = len(accepted_detail_rows)
 
     results = {
@@ -1693,6 +2258,9 @@ def run_audit(records: list[RowRecord]) -> dict[str, Any]:
         "accepted_exception_counts": dict(accepted_codes),
         "detail_rows": detail_rows,
         "accepted_detail_rows": accepted_detail_rows,
+        "student_completeness_rows": student_completeness_rows,
+        "student_completeness_issue_counts": dict(student_completeness_codes),
+        "progress_rollup": progress_rollup_from_records(records),
     }
     results["reconciliation"] = reconcile_audit_counts(records, results)
     return results
@@ -1707,6 +2275,7 @@ def _detail_row(record: RowRecord, codes: list[str]) -> dict[str, Any]:
         "metric": clean_value(_text(record, "Metric")),
         "baseline": clean_value(_text(record, "Baseline")),
         "target": clean_value(_text(record, "Target")),
+        "latest_progress": latest_metric_value(record),
         "issue_codes": ";".join(codes),
     }
 
@@ -1725,6 +2294,7 @@ def write_audit_flags_csv(
         "metric",
         "baseline",
         "target",
+        "latest_progress",
         "issue_codes",
     ]
     if include_school_year:
@@ -1795,6 +2365,7 @@ def write_partitioned_audit_exports(
     *,
     detail_rows: list[dict[str, Any]],
     accepted_detail_rows: list[dict[str, Any]],
+    student_completeness_rows: list[dict[str, Any]] | None = None,
     include_school_year: bool = False,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1803,6 +2374,7 @@ def write_partitioned_audit_exports(
     paths: dict[str, str] = {
         "audit_flags": str(output_dir / "audit_flags.csv"),
         "partial_goal_metrics_flags": str(output_dir / "partial_goal_metrics_flags.csv"),
+        "student_completeness_flags": str(output_dir / "student_completeness_flags.csv"),
     }
     write_audit_flags_csv(
         Path(paths["audit_flags"]),
@@ -1812,6 +2384,11 @@ def write_partitioned_audit_exports(
     write_audit_flags_csv(
         Path(paths["partial_goal_metrics_flags"]),
         partial_rows,
+        include_school_year=include_school_year,
+    )
+    write_audit_flags_csv(
+        Path(paths["student_completeness_flags"]),
+        student_completeness_rows or [],
         include_school_year=include_school_year,
     )
     for export_key, _codes, filename in ACCEPTED_EXPORT_SPECS:
@@ -1884,12 +2461,10 @@ def _format_baseline_without_target_breakdown(
         return None
     excluded = accepted_baseline_supplemental_exclusions(accepted_counts)
     total = raw - excluded
-    flagged = int(partial_counts.get("baseline_without_target_non_goal_context", 0) or 0)
-    no_abc_goals = int(accepted_counts.get("baseline_without_target_no_goal_context", 0) or 0)
+    flagged = int(partial_counts.get("baseline_without_target", 0) or 0)
     return (
-        f"- Baseline without target (excl. supplemental): **{total}** "
-        f"({flagged} flagged, {no_abc_goals} no ABC goals yet; "
-        f"{excluded} supplemental excluded)"
+        f"- Baseline without target (excl. non-goal metrics): **{total}** "
+        f"({flagged} flagged; {excluded} non-goal excluded)"
     )
 
 
@@ -1946,6 +2521,16 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
         "## Counts",
         "",
         f"- Rows evaluated: **{summary.get('rows', 0)}**",
+        (
+            "- EWGSPE-only students excluded: "
+            f"**{summary.get('ewgspe_only_students_excluded', 0)}** "
+            f"({summary.get('rows_excluded_ewgspe_students', 0)} rows)"
+        ),
+        f"- Enrollment scope: **{summary.get('enrollment_filter', 'all_rows')}**",
+        (
+            "- Student ABC completeness flagged: "
+            f"**{summary.get('student_completeness_flagged', 0)}**"
+        ),
         f"- Rows flagged: **{len(detail_rows)}**",
         f"- Partial goal metrics (flagged): **{partial_row_count}**",
         f"- Data quality issues: **{data_quality_row_count}**",
@@ -1970,15 +2555,15 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
             distribution=distribution,
             flagged_counts=partial_counts,
             accepted_counts=accepted_counts,
-            flagged_code="target_without_baseline_non_goal_context",
-            accepted_code="target_without_baseline_no_goal_context",
+            flagged_code="target_without_baseline",
+            accepted_code="target_without_baseline_supplemental_metric",
             label="Target without baseline",
         ),
     ):
         if breakdown:
             lines.append(breakdown)
     if any(
-        line.startswith("- Baseline without target (excl. supplemental):")
+        line.startswith("- Baseline without target (excl. non-goal metrics):")
         or line.startswith("- Target without baseline:")
         for line in lines
     ):
@@ -1986,10 +2571,8 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
     if accepted_counts:
         lines.extend(["## Accepted exceptions", ""])
         lines.append(
-            "Domain tracking, supplemental metrics, or students with no ABC goal "
-            "metrics set yet. Row-level detail: "
-            "`accepted_no_goal_context.csv`, `accepted_domain_tracking.csv`, "
-            "`accepted_supplemental.csv`."
+            "Non-goal metrics: baseline-only rows for students who already have another "
+            "complete goal-metric row in the same school year."
         )
         lines.append("")
         lines.extend(_format_issue_counts(accepted_counts))
@@ -1997,8 +2580,8 @@ def write_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
     if partial_counts:
         lines.extend(["## Partial goal metrics", ""])
         lines.append(
-            "Primary ABCS goal metric missing a target for an ABC domain where the "
-            "student has other ABC domains set up. Row-level detail: "
+            "Baseline-only or target-only rows where the student has no other complete "
+            "goal-metric row in the school year. Row-level detail: "
             "`partial_goal_metrics_flags.csv`."
         )
         lines.append("")
@@ -2051,7 +2634,7 @@ def year_audit_metrics(results: dict[str, Any]) -> dict[str, Any]:
         "baseline_and_target_present": baseline_and_target,
         "baseline_without_target_excl_supplemental": baseline_excl_supplemental,
         "partial_goal_metrics_flagged": int(
-            issue_counts.get("baseline_without_target_non_goal_context", 0) or 0
+            issue_counts.get("baseline_without_target", 0) or 0
         ),
         "accepted_domain_tracking": domain_tracking,
         "accepted_supplemental": supplemental,
@@ -2081,6 +2664,7 @@ def build_dataset_manifest(
     export_paths: dict[str, str],
     detail_rows: list[dict[str, Any]],
     accepted_detail_rows: list[dict[str, Any]],
+    student_completeness_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     partial_rows, data_quality_rows = partition_flagged_detail_rows(detail_rows)
     accepted_buckets = partition_accepted_detail_rows(accepted_detail_rows)
@@ -2092,6 +2676,10 @@ def build_dataset_manifest(
         "partial_goal_metrics_flags": {
             "path": Path(export_paths["partial_goal_metrics_flags"]).name,
             "row_count": len(partial_rows),
+        },
+        "student_completeness_flags": {
+            "path": Path(export_paths["student_completeness_flags"]).name,
+            "row_count": len(student_completeness_rows or []),
         },
     }
     for export_key, _codes, filename in ACCEPTED_EXPORT_SPECS:
@@ -2156,9 +2744,11 @@ def write_cumulative_summary_markdown(path: Path, payload: dict[str, Any]) -> No
         "rows_evaluated": "Rows evaluated",
         "baseline_and_target_present": "Baseline + target present",
         "baseline_without_target_excl_supplemental": (
-            "Baseline without target (excl. supplemental tracking)"
+            "Baseline without target (excl. non-goal metrics)"
         ),
-        "partial_goal_metrics_flagged": "Partial goal metrics flagged (primary, domain missing target)",
+        "partial_goal_metrics_flagged": (
+            "Baseline without target flagged (no other complete goal in SY)"
+        ),
         "accepted_domain_tracking": "Accepted: domain tracking metrics",
         "accepted_supplemental": "Accepted: supplemental metrics",
         "accepted_no_abc_goals": "Accepted: no ABC goals set yet",
@@ -2170,9 +2760,13 @@ def write_cumulative_summary_markdown(path: Path, payload: dict[str, Any]) -> No
     lines = [
         "# Student Metrics Audit (cumulative)",
         "",
-        "Rules: one goal per ABC domain; accept supplemental baseline-only when domain "
-        "has a complete goal metric; flag primary goal metric when domain has no target "
-        "and student has other ABC goals set.",
+        "Rules: include all students except those whose Goal Achievement is only "
+        f'"{GOAL_ACHIEVEMENT_EWGSPE}" (from Goal Progress Detail when available); '
+        "exclude baseline-only rows when the student has another complete "
+        "goal-metric row in the same school year (non-goal metrics); flag baseline-only "
+        "or target-only rows when no complete goal exists for that student in the SY; "
+        "student ABC completeness (3 baselines + 1 target, attendance-only for Pocono/SE Delco) "
+        "in `student_completeness_flags.csv`.",
         "",
         f"- **Run at:** {payload.get('run_at', '')}",
         f"- **School years:** {', '.join(school_years)}",
@@ -2213,15 +2807,19 @@ def export_cumulative_results(
     payload = build_cumulative_payload(year_runs)
     detail_rows: list[dict[str, Any]] = []
     accepted_detail_rows: list[dict[str, Any]] = []
+    student_completeness_rows: list[dict[str, Any]] = []
     for school_year, results, _workbook in year_runs:
         for row in results.get("detail_rows") or []:
             detail_rows.append({"school_year": school_year, **row})
         for row in results.get("accepted_detail_rows") or []:
             accepted_detail_rows.append({"school_year": school_year, **row})
+        for row in results.get("student_completeness_rows") or []:
+            student_completeness_rows.append({"school_year": school_year, **row})
     export_paths = write_partitioned_audit_exports(
         output_dir,
         detail_rows=detail_rows,
         accepted_detail_rows=accepted_detail_rows,
+        student_completeness_rows=student_completeness_rows,
         include_school_year=True,
     )
     paths = {
@@ -2233,6 +2831,7 @@ def export_cumulative_results(
         export_paths=export_paths,
         detail_rows=detail_rows,
         accepted_detail_rows=accepted_detail_rows,
+        student_completeness_rows=student_completeness_rows,
     )
     Path(paths["audit_summary_json"]).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -2275,6 +2874,8 @@ def results_to_json_payload(
         "student_client_audit": results.get("student_client_audit", {}),
         "detail_row_count": len(detail_rows),
         "accepted_detail_row_count": len(results.get("accepted_detail_rows") or []),
+        "student_completeness_row_count": len(results.get("student_completeness_rows") or []),
+        "student_completeness_issue_counts": results.get("student_completeness_issue_counts", {}),
         "reconciliation": results.get("reconciliation") or {},
     }
     if school_year:
@@ -2293,10 +2894,12 @@ def export_results(
     output_dir.mkdir(parents=True, exist_ok=True)
     detail_rows = results.get("detail_rows") or []
     accepted_detail_rows = results.get("accepted_detail_rows") or []
+    student_completeness_rows = results.get("student_completeness_rows") or []
     export_paths = write_partitioned_audit_exports(
         output_dir,
         detail_rows=detail_rows,
         accepted_detail_rows=accepted_detail_rows,
+        student_completeness_rows=student_completeness_rows,
     )
     payload = results_to_json_payload(
         results,
@@ -2308,6 +2911,7 @@ def export_results(
         export_paths=export_paths,
         detail_rows=detail_rows,
         accepted_detail_rows=accepted_detail_rows,
+        student_completeness_rows=student_completeness_rows,
     )
     paths = {
         **export_paths,
@@ -2330,7 +2934,12 @@ def export_results(
 
 def evaluate_workbook(workbook_path: Path, config: AuditConfig) -> dict[str, Any]:
     records = load_rows(workbook_path, sheet_name=config.sheet_name)
-    results = run_audit(records)
+    results = run_audit(
+        records,
+        school_year=config.school_year,
+        excluded_student_ids=config.excluded_student_ids,
+        goal_progress_workbook=config.goal_progress_workbook,
+    )
     results["workbook"] = str(workbook_path.resolve())
     results["sheet"] = config.sheet_name
     results["config"] = asdict(config)
@@ -2467,7 +3076,12 @@ def main(argv: list[str] | None = None) -> int:
         if not workbook.is_file():
             print(f"error: workbook not found: {workbook}", file=sys.stderr)
             return 1
-        results = evaluate_workbook(workbook, config)
+        year_config = AuditConfig(
+            sheet_name=config.sheet_name,
+            include_ok_rows=config.include_ok_rows,
+            school_year=school_year,
+        )
+        results = evaluate_workbook(workbook, year_config)
         summaries.append((results, school_year))
         if mode == "cumulative":
             year_runs.append((school_year or "", results, str(workbook)))
@@ -2534,6 +3148,732 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payloads if len(payloads) > 1 else payloads[0], indent=2, sort_keys=True))
 
     return 0
+
+
+# --- goal achievement audit (GAR) ---
+
+GAR_HEADER_COUNT = 36
+GAR_REQUIRED_HEADERS = frozenset(
+    {
+        "Home School",
+        "Metric",
+        "Baseline",
+        "Target",
+        "Goal Achievement",
+        "Achieved Value",
+    }
+)
+GAR_METRIC_DIRECTIONS: dict[str, str] = {
+    "Attendance Rate (%)": "higher",
+    "Attendance Rate (days absent)": "lower",
+    "Credits Needed/Credit Completion": "higher",
+    "Suspensions": "lower",
+    "Tardies": "lower",
+    "Disciplinary Referrals": "lower",
+    "Conduct": "lower",
+    "Other Behavior Incidents": "lower",
+    "Drank Alcohol (# of times past 30 days)": "lower",
+    "Violent/bullied someone (# of times past 30 days)": "lower",
+    "Other (SEL)": "higher",
+    "Accept a position of employment": "higher",
+    "Create a resume": "higher",
+    "Interview with one or more potential employers": "higher",
+    "Other High Risk Behavior": "lower",
+    "Complete career assessment": "higher",
+    "Other College Readiness": "higher",
+    "Other Career Readiness": "higher",
+    "Apply to one or more colleges/universities": "higher",
+    "Accepted to one or more colleges/universities": "higher",
+}
+GAR_GRADE_SCALE: dict[str, int] = {
+    "F": 0,
+    "D-": 1,
+    "D": 2,
+    "D+": 3,
+    "C-": 4,
+    "C": 5,
+    "C+": 6,
+    "B-": 7,
+    "B": 8,
+    "B+": 9,
+    "A-": 10,
+    "A": 11,
+    "A+": 12,
+}
+GAR_PERCENT_TO_GRADE_THRESHOLD: list[tuple[int, str]] = [
+    (100, "A+"),
+    (93, "A"),
+    (90, "A-"),
+    (87, "B+"),
+    (83, "B"),
+    (80, "B-"),
+    (77, "C+"),
+    (73, "C"),
+    (70, "C-"),
+    (67, "D+"),
+    (63, "D"),
+    (60, "D-"),
+    (0, "F"),
+]
+GAR_ALTERNATE_GRADE_SCALE: dict[str, int] = {
+    "BB": 1,
+    "BASIC": 2,
+    "B": 2,
+    "PROFECIENT": 3,
+    "PROFICIENT": 3,
+    "P": 3,
+    "ADVANCED": 4,
+    "A": 4,
+}
+GAR_YES_NO_METRICS = frozenset(
+    {
+        "Accept a position of employment",
+        "Create a resume",
+        "Interview with one or more potential employers",
+        "Complete career assessment",
+        "Apply to one or more colleges/universities",
+        "Accepted to one or more colleges/universities",
+    }
+)
+GAR_BASELINE_GRACE_DAYS = 45
+GAR_ENROLLMENT_START_KEYS = ("Enrollment Begin Date", "Enroll Start Date", "Enrollment BeginDate")
+GAR_ENROLLMENT_END_KEYS = ("Enrollment Exit Date", "Enroll End Date", "Enrollment EndDate")
+
+GarRecord: TypeAlias = dict[str, str | None | int]
+
+
+def _gar_get_worksheet(workbook_path: Path, sheet_name: str):
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    if sheet_name not in workbook.sheetnames:
+        available = ", ".join(workbook.sheetnames)
+        workbook.close()
+        raise ValueError(f"Worksheet not found: {sheet_name}. Available sheets: {available}")
+    return workbook, workbook[sheet_name]
+
+
+def _gar_validate_headers(headers: list[str | None], sheet_name: str) -> None:
+    present = {header for header in headers if header}
+    missing = sorted(header for header in GAR_REQUIRED_HEADERS if header not in present)
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"Worksheet {sheet_name} is missing required headers: {joined}")
+
+
+def load_goal_progress_rows(
+    workbook_path: Path,
+    sheet_name: str = GOAL_PROGRESS_SHEET,
+) -> list[GarRecord]:
+    workbook, sheet = _gar_get_worksheet(workbook_path, sheet_name)
+    rows = list(sheet.iter_rows(values_only=True))
+    if len(rows) < GOAL_PROGRESS_HEADER_ROW:
+        workbook.close()
+        raise ValueError(f"Worksheet {sheet_name} does not contain header row {GOAL_PROGRESS_HEADER_ROW}")
+    headers = [to_cell_text(value) for value in rows[GOAL_PROGRESS_HEADER_ROW - 1][:GAR_HEADER_COUNT]]
+    _gar_validate_headers(headers, sheet_name)
+    records: list[GarRecord] = []
+    for row_number, row_values in enumerate(rows[GOAL_PROGRESS_HEADER_ROW:], start=GOAL_PROGRESS_HEADER_ROW + 1):
+        record: GarRecord = {"row_number": row_number}
+        for index, header in enumerate(headers):
+            if header:
+                record[header] = to_cell_text(row_values[index]) if index < len(row_values) else None
+        records.append(record)
+    workbook.close()
+    return records
+
+
+def _load_flexible_goal_progress_rows(workbook: Any) -> list[GarRecord]:
+    worksheet = workbook[workbook.sheetnames[0]]
+    header_row: list[str] | None = None
+    header_index = -1
+    for row_number, row in enumerate(
+        worksheet.iter_rows(values_only=True, max_row=10),
+        start=1,
+    ):
+        header_row = [to_cell_text(value) for value in row]
+        normalized = [cell or "" for cell in header_row]
+        if "Student ID" in normalized and "Goal Achievement" in normalized:
+            header_index = row_number
+            break
+        header_row = None
+    if header_row is None:
+        return []
+    records: list[GarRecord] = []
+    for row_number, row_values in enumerate(
+        worksheet.iter_rows(min_row=header_index + 1, values_only=True),
+        start=header_index + 1,
+    ):
+        if not row_values or not any(row_values):
+            continue
+        record: GarRecord = {"row_number": row_number}
+        for index, header in enumerate(header_row):
+            if not header:
+                continue
+            value = row_values[index] if index < len(row_values) else None
+            record[header] = to_cell_text(value)
+        school = clean_value(str(record.get("School") or ""))
+        if school and not clean_value(str(record.get("Home School") or "")):
+            record["Home School"] = school
+        records.append(record)
+    return records
+
+
+def load_goal_progress_gar_records(workbook_path: Path) -> list[GarRecord]:
+    """Load rows for GAR from CIS_StudentProgress_Detail or archive variants."""
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if GOAL_PROGRESS_SHEET in workbook.sheetnames:
+            workbook.close()
+            try:
+                return load_goal_progress_rows(workbook_path, sheet_name=GOAL_PROGRESS_SHEET)
+            except ValueError:
+                workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+        return _load_flexible_goal_progress_rows(workbook)
+    finally:
+        workbook.close()
+
+
+def gar_percentage_to_grade(percentage: float) -> str | None:
+    if percentage < 0 or percentage > 100:
+        return None
+    for threshold, grade in GAR_PERCENT_TO_GRADE_THRESHOLD:
+        if percentage >= threshold:
+            return grade
+    return None
+
+
+def gar_parse_date(value: object | None) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = clean_value(str(value))
+    if text is None:
+        return None
+    if " " in text:
+        text = text.split(" ", 1)[0].strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d-%b-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def gar_enrollment_start_date(record: GarRecord) -> date | None:
+    for key in GAR_ENROLLMENT_START_KEYS:
+        parsed = gar_parse_date(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def gar_enrollment_end_date(record: GarRecord) -> date | None:
+    for key in GAR_ENROLLMENT_END_KEYS:
+        parsed = gar_parse_date(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def gar_comparable_value(
+    metric: str | None,
+    value: str | None,
+    context: dict[str, str] | None = None,
+) -> float | None:
+    metric_name = clean_value(metric) or ""
+    grade = normalize_grade(value)
+    if "Core Course Grades" in metric_name:
+        if grade in GAR_GRADE_SCALE:
+            return float(GAR_GRADE_SCALE[grade])
+        if grade in GAR_ALTERNATE_GRADE_SCALE:
+            return float(GAR_ALTERNATE_GRADE_SCALE[grade])
+        if value is not None:
+            try:
+                pct = float(str(value).strip())
+                if 0 <= pct <= 100:
+                    letter = gar_percentage_to_grade(pct)
+                    if letter:
+                        return float(GAR_GRADE_SCALE[letter])
+            except (ValueError, TypeError):
+                pass
+        return None
+    numeric = parse_number(value)
+    if numeric is not None:
+        return numeric
+    if grade in GAR_GRADE_SCALE:
+        return float(GAR_GRADE_SCALE[grade])
+    if grade in GAR_ALTERNATE_GRADE_SCALE:
+        return float(GAR_ALTERNATE_GRADE_SCALE[grade])
+    context_key = f"{metric_name}|{value}"
+    if context is not None and context_key in context:
+        scale_type = context[context_key]
+        if scale_type == "alternate" and grade in GAR_ALTERNATE_GRADE_SCALE:
+            return float(GAR_ALTERNATE_GRADE_SCALE[grade])
+        if scale_type == "letter" and grade in GAR_GRADE_SCALE:
+            return float(GAR_GRADE_SCALE[grade])
+    if metric_name in GAR_YES_NO_METRICS:
+        yes_no = clean_value(value)
+        if yes_no is None:
+            return None
+        yes_no_norm = yes_no.lower()
+        if yes_no_norm == "yes":
+            return 1.0
+        if yes_no_norm == "no":
+            return 0.0
+    if "engagement" in metric_name.lower():
+        engagement_value = clean_value(value)
+        if engagement_value is not None:
+            engagement_norm = engagement_value.lower().strip()
+            if "lower" in engagement_norm:
+                return 1.0
+            if "moderate" in engagement_norm:
+                return 2.0
+            if "higher" in engagement_norm or "high" in engagement_norm:
+                return 3.0
+    if "Reading Level" in metric_name and grade is not None:
+        return parse_number(grade)
+    if "Core Course Grades" in metric_name and value is not None:
+        try:
+            pct = float(str(value).strip())
+            if 0 <= pct <= 100:
+                letter = gar_percentage_to_grade(pct)
+                if letter:
+                    if context is not None:
+                        context[context_key] = "letter"
+                    return float(GAR_GRADE_SCALE[letter])
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def gar_metric_direction(metric: str | None) -> str | None:
+    metric_name = clean_value(metric)
+    if metric_name is None:
+        return None
+    if "(SEAD)" in metric_name:
+        return "higher"
+    if "overall sead" in metric_name.lower() and "assessment score" in metric_name.lower():
+        return "higher"
+    if metric_name in GAR_METRIC_DIRECTIONS:
+        return GAR_METRIC_DIRECTIONS[metric_name]
+    lowered = metric_name.lower()
+    if "grade" in lowered or "gpa" in lowered or "score" in lowered or "engagement" in lowered:
+        return "higher"
+    if "attendance rate" in lowered:
+        return "higher" if "%" in metric_name else "lower"
+    if "absence" in lowered or "suspension" in lowered or "tard" in lowered:
+        return "lower"
+    if "referral" in lowered or "incident" in lowered or "conduct" in lowered:
+        return "lower"
+    if "credits needed" in lowered or "credit completion" in lowered:
+        return "higher"
+    return None
+
+
+def gar_baseline_grace_applies(record: GarRecord, metric: str | None, as_of: date) -> bool:
+    baseline_missing = gar_comparable_value(metric, str(record.get("Baseline") or "")) is None
+    if not baseline_missing:
+        return False
+    if gar_comparable_value(metric, str(record.get("Target") or "")) is None:
+        return False
+    if gar_comparable_value(metric, str(record.get("Achieved Value") or "")) is None:
+        return False
+    start = gar_enrollment_start_date(record)
+    if start is None or start > as_of:
+        return False
+    return (as_of - start).days < GAR_BASELINE_GRACE_DAYS
+
+
+def gar_baseline_grace_reason(record: GarRecord, as_of: date) -> str:
+    start = gar_enrollment_start_date(record)
+    end = gar_enrollment_end_date(record)
+    if start is None:
+        return "baseline grace period (enrollment start date missing)"
+    days = (as_of - start).days
+    end_note = f"enrollment end date {end.isoformat()}" if end else "enrollment end date not provided"
+    return (
+        f"baseline not audited yet: {days} days since enrollment begin ({start.isoformat()}); "
+        f"{end_note} (within {GAR_BASELINE_GRACE_DAYS}-day window after enrollment start)"
+    )
+
+
+def gar_classify_row(
+    record: GarRecord,
+    context: dict[str, str] | None = None,
+) -> dict[str, str | None]:
+    metric = str(record.get("Metric") or "")
+    existing = clean_value(str(record.get("Goal Achievement") or ""))
+    if existing == GOAL_ACHIEVEMENT_EWGSPE:
+        return {"expected": existing, "direction": gar_metric_direction(metric), "reason": "special_status"}
+    direction = gar_metric_direction(metric)
+    if context is None:
+        context = {}
+    baseline = gar_comparable_value(metric, str(record.get("Baseline") or ""), context)
+    target = gar_comparable_value(metric, str(record.get("Target") or ""), context)
+    achieved = gar_comparable_value(metric, str(record.get("Achieved Value") or ""), context)
+    as_of = date.today()
+    if direction is not None and gar_baseline_grace_applies(record, metric, as_of):
+        return {"expected": None, "direction": direction, "reason": "baseline_grace_period"}
+    if direction is None or None in {baseline, target, achieved}:
+        return {"expected": None, "direction": direction, "reason": "manual_review"}
+    meets_target = achieved >= target if direction == "higher" else achieved <= target
+    improved = achieved > baseline if direction == "higher" else achieved < baseline
+    if meets_target:
+        expected = "Goal Met"
+    elif improved:
+        expected = "Goal Not Met, With Progress"
+    else:
+        expected = "Goal Not Met, No Progress"
+    return {"expected": expected, "direction": direction, "reason": "rule_based"}
+
+
+def gar_filter_records(
+    records: list[GarRecord],
+    school: str | None,
+    metric: str | None,
+) -> list[GarRecord]:
+    filtered: list[GarRecord] = []
+    for record in records:
+        if school and clean_value(str(record.get("Home School") or "")) != school:
+            continue
+        if metric and clean_value(str(record.get("Metric") or "")) != metric:
+            continue
+        filtered.append(record)
+    return filtered
+
+
+def gar_summarize(
+    records: list[GarRecord],
+    context: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    summary: Counter[str] = Counter()
+    mismatches: list[dict[str, Any]] = []
+    direction_counts: Counter[str] = Counter()
+    if context is None:
+        context = {}
+    for record in records:
+        classification = gar_classify_row(record, context)
+        expected = classification["expected"]
+        existing = clean_value(str(record.get("Goal Achievement") or ""))
+        direction = classification["direction"]
+        reason = classification["reason"]
+        if direction:
+            direction_counts[direction] += 1
+        summary["total_rows"] += 1
+        summary[f"reason::{reason}"] += 1
+        if existing:
+            summary[f"existing::{existing}"] += 1
+        if expected:
+            summary[f"expected::{expected}"] += 1
+        if expected and existing and expected == existing:
+            summary["matched"] += 1
+        elif expected and existing:
+            summary["mismatched"] += 1
+            mismatches.append(
+                {
+                    "row_number": record["row_number"],
+                    "home_school": record.get("Home School"),
+                    "goal": record.get("Goal"),
+                    "metric": record.get("Metric"),
+                    "baseline": record.get("Baseline"),
+                    "target": record.get("Target"),
+                    "achieved_value": record.get("Achieved Value"),
+                    "existing_goal_achievement": existing,
+                    "expected_goal_achievement": expected,
+                    "direction": direction,
+                }
+            )
+        else:
+            summary["manual_review_rows"] += 1
+    return {
+        "summary": dict(summary),
+        "direction_counts": dict(direction_counts),
+        "mismatch_examples": mismatches[:25],
+    }
+
+
+def gar_explain_exception(
+    record: GarRecord,
+    classification: dict[str, str | None],
+) -> dict[str, str]:
+    reason = classification["reason"]
+    expected = classification["expected"]
+    existing = clean_value(str(record.get("Goal Achievement") or ""))
+    metric = str(record.get("Metric") or "")
+    if reason == "baseline_grace_period":
+        return {
+            "exception_type": "needs_manual_review",
+            "reason": gar_baseline_grace_reason(record, date.today()),
+        }
+    if reason == "manual_review":
+        if classification["direction"] is None:
+            return {
+                "exception_type": "needs_manual_review",
+                "reason": "metric direction is not mapped",
+            }
+        missing_fields = []
+        if gar_comparable_value(metric, str(record.get("Baseline") or "")) is None:
+            missing_fields.append("baseline")
+        if gar_comparable_value(metric, str(record.get("Target") or "")) is None:
+            missing_fields.append("target")
+        if gar_comparable_value(metric, str(record.get("Achieved Value") or "")) is None:
+            missing_fields.append("achieved value")
+        if missing_fields:
+            if len(missing_fields) > 1:
+                return {
+                    "exception_type": "needs_manual_review",
+                    "reason": "multiple values not comparable",
+                }
+            joined = ", ".join(missing_fields)
+            return {
+                "exception_type": "needs_manual_review",
+                "reason": f"{joined} missing or not comparable",
+            }
+        return {
+            "exception_type": "needs_manual_review",
+            "reason": "needs manual review",
+        }
+    if reason == "special_status":
+        return {
+            "exception_type": "special_status",
+            "reason": "special status preserved",
+        }
+    if expected and existing and expected != existing:
+        return {
+            "exception_type": "goal_achievement_mismatch",
+            "reason": "recorded result does not match recalculated result",
+        }
+    return {
+        "exception_type": "informational",
+        "reason": "no exception",
+    }
+
+
+def gar_build_exception_rows(
+    records: list[GarRecord],
+    context: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if context is None:
+        context = {}
+    for record in records:
+        classification = gar_classify_row(record, context)
+        expected = classification["expected"]
+        existing = clean_value(str(record.get("Goal Achievement") or ""))
+        direction = classification["direction"]
+        reason = classification["reason"]
+        if reason in ("manual_review", "baseline_grace_period"):
+            explanation = gar_explain_exception(record, classification)
+            rows.append(
+                {
+                    "exception_type": explanation["exception_type"],
+                    "row_number": record["row_number"],
+                    "home_school": record.get("Home School"),
+                    "goal": record.get("Goal"),
+                    "metric": record.get("Metric"),
+                    "baseline": record.get("Baseline"),
+                    "target": record.get("Target"),
+                    "achieved_value": record.get("Achieved Value"),
+                    "existing_goal_achievement": existing,
+                    "expected_goal_achievement": expected,
+                    "direction": direction,
+                    "reason": explanation["reason"],
+                }
+            )
+        elif expected and existing and expected != existing:
+            explanation = gar_explain_exception(record, classification)
+            rows.append(
+                {
+                    "exception_type": explanation["exception_type"],
+                    "row_number": record["row_number"],
+                    "home_school": record.get("Home School"),
+                    "goal": record.get("Goal"),
+                    "metric": record.get("Metric"),
+                    "baseline": record.get("Baseline"),
+                    "target": record.get("Target"),
+                    "achieved_value": record.get("Achieved Value"),
+                    "existing_goal_achievement": existing,
+                    "expected_goal_achievement": expected,
+                    "direction": direction,
+                    "reason": explanation["reason"],
+                }
+            )
+    return rows
+
+
+def gar_build_report_details(
+    records: list[GarRecord],
+    context: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    school_summary: dict[str, Counter[str]] = {}
+    mismatch_schools: Counter[str] = Counter()
+    mismatch_metrics: Counter[str] = Counter()
+    mismatch_patterns: Counter[tuple[str, str]] = Counter()
+    manual_review_schools: Counter[str] = Counter()
+    manual_review_metrics: Counter[str] = Counter()
+    if context is None:
+        context = {}
+
+    for record in records:
+        school = clean_value(str(record.get("Home School") or "")) or "Unknown School"
+        metric = clean_value(str(record.get("Metric") or "")) or "Unknown Metric"
+        school_counts = school_summary.setdefault(school, Counter())
+        school_counts["total_rows"] += 1
+
+        classification = gar_classify_row(record, context)
+        expected = classification["expected"]
+        existing = clean_value(str(record.get("Goal Achievement") or ""))
+        reason = classification["reason"]
+
+        if reason == "special_status":
+            school_counts["special_status"] += 1
+        elif reason in ("manual_review", "baseline_grace_period"):
+            school_counts["manual_review"] += 1
+            manual_review_schools[school] += 1
+            manual_review_metrics[metric] += 1
+        elif expected and existing and expected == existing:
+            school_counts["matched"] += 1
+        elif expected and existing:
+            school_counts["mismatched"] += 1
+            mismatch_schools[school] += 1
+            mismatch_metrics[metric] += 1
+            mismatch_patterns[(existing, expected)] += 1
+
+    school_rows = []
+    for school in sorted(school_summary):
+        counts = school_summary[school]
+        school_rows.append(
+            {
+                "school": school,
+                "total_rows": counts.get("total_rows", 0),
+                "matched": counts.get("matched", 0),
+                "mismatched": counts.get("mismatched", 0),
+                "manual_review": counts.get("manual_review", 0),
+                "special_status": counts.get("special_status", 0),
+            }
+        )
+
+    return {
+        "school_summary": school_rows,
+        "top_mismatch_schools": mismatch_schools.most_common(10),
+        "top_mismatch_metrics": mismatch_metrics.most_common(10),
+        "top_mismatch_patterns": mismatch_patterns.most_common(10),
+        "top_manual_review_schools": manual_review_schools.most_common(10),
+        "top_manual_review_metrics": manual_review_metrics.most_common(10),
+    }
+
+
+def gar_write_markdown_report(payload: dict[str, Any], report_path: Path) -> None:
+    summary = payload["summary"]
+    direction_counts = payload["direction_counts"]
+    mismatch_examples = payload["mismatch_examples"]
+    report_details = payload.get("report_details", {})
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Goal Achievement Audit Report",
+        "",
+        f"- Workbook: `{payload['workbook']}`",
+        f"- Worksheet: `{payload['sheet_name']}`",
+        f"- Rows analyzed: {payload['record_count']}",
+        f"- Matched: {summary.get('matched', 0)}",
+        f"- Mismatched: {summary.get('mismatched', 0)}",
+        f"- Manual review: {summary.get('manual_review_rows', 0)}",
+        "",
+        "## Direction counts",
+    ]
+    for key, value in sorted(direction_counts.items()):
+        lines.append(f"- `{key}`: {value}")
+    top_mismatch_schools = report_details.get("top_mismatch_schools", [])
+    if top_mismatch_schools:
+        lines.extend(["", "## Top mismatch schools"])
+        for school, count in top_mismatch_schools:
+            lines.append(f"- `{school}`: {count}")
+    top_mismatch_metrics = report_details.get("top_mismatch_metrics", [])
+    if top_mismatch_metrics:
+        lines.extend(["", "## Top mismatch metrics"])
+        for metric, count in top_mismatch_metrics:
+            lines.append(f"- `{metric}`: {count}")
+    top_manual_review_metrics = report_details.get("top_manual_review_metrics", [])
+    if top_manual_review_metrics:
+        lines.extend(["", "## Top manual review metrics"])
+        for metric, count in top_manual_review_metrics:
+            lines.append(f"- `{metric}`: {count}")
+    top_mismatch_patterns = report_details.get("top_mismatch_patterns", [])
+    if top_mismatch_patterns:
+        lines.extend(["", "## Mismatch patterns"])
+        for (existing, expected), count in top_mismatch_patterns:
+            lines.append(f"- recorded `{existing}` -> expected `{expected}`: {count}")
+    school_summary = report_details.get("school_summary", [])
+    if school_summary:
+        lines.extend(
+            [
+                "",
+                "## School summary",
+                "",
+                "| School | Rows | Matched | Mismatched | Manual review | Special status |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for item in school_summary:
+            lines.append(
+                f"| {item['school']} | {item['total_rows']} | {item['matched']} | "
+                f"{item['mismatched']} | {item['manual_review']} | {item['special_status']} |"
+            )
+    if mismatch_examples:
+        lines.extend(["", "## Sample mismatches"])
+        for item in mismatch_examples[:10]:
+            lines.append(
+                "- "
+                f"{item['home_school']} | {item['metric']} | "
+                f"recorded `{item['existing_goal_achievement']}` vs expected `{item['expected_goal_achievement']}`"
+            )
+    report_path.write_text("\n".join(lines) + "\n")
+
+
+def gar_write_csv_report(exception_rows: list[dict[str, Any]], report_path: Path) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "exception_type",
+        "row_number",
+        "home_school",
+        "goal",
+        "metric",
+        "baseline",
+        "target",
+        "achieved_value",
+        "existing_goal_achievement",
+        "expected_goal_achievement",
+        "direction",
+        "reason",
+    ]
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(exception_rows)
+
+
+def run_gar_audit(
+    records: list[GarRecord],
+    *,
+    school: str | None = None,
+    metric: str | None = None,
+) -> dict[str, Any]:
+    context: dict[str, str] = {}
+    filtered = gar_filter_records(records, school, metric)
+    results = gar_summarize(filtered, context)
+    exception_rows = gar_build_exception_rows(filtered, context)
+    report_details = gar_build_report_details(filtered, context)
+    return {
+        "exception_rows": exception_rows,
+        "summary": results["summary"],
+        "direction_counts": results["direction_counts"],
+        "mismatch_examples": results["mismatch_examples"],
+        "report_details": report_details,
+        "record_count": len(filtered),
+        "sheet_name": GOAL_PROGRESS_SHEET,
+    }
 
 
 if __name__ == "__main__":

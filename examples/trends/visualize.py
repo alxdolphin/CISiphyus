@@ -36,7 +36,7 @@ MOVEMENT_TYPE_LABELS: dict[str, str] = {
 GLOBAL_METRIC_LABELS: dict[str, str] = {
     "baseline_without_target": "Baseline without target",
     "both_baseline_and_target_blank": "Baseline and target blank",
-    "baseline_target_direction_mismatch": "Target not better than baseline",
+    "baseline_target_direction_mismatch": "Direction mismatches",
 }
 
 EOY_PERIOD = "EOY"
@@ -181,8 +181,190 @@ def load_eoy_global_issue_counts(snapshots_dir: Path, school_year: str) -> dict[
     values: dict[str, int | None] = {}
     for metric in GLOBAL_METRICS:
         raw = counts.get(metric)
-        values[metric] = int(raw) if raw is not None else None
+        values[metric] = int(raw) if raw is not None else 0
     return values
+
+
+def _cisiphyus_root() -> Path:
+    return Path(os.environ.get("CISIPHYUS_ROOT", str(Path(__file__).resolve().parents[2])))
+
+
+def load_metrics_audit_payload(
+    snapshots_dir: Path | None,
+    school_year: str,
+) -> dict[str, Any] | None:
+    candidates: list[Path] = []
+    if snapshots_dir is not None:
+        candidates.append(
+            snapshots_dir / school_year / EOY_PERIOD / "metrics" / "audit_summary.json"
+        )
+    candidates.append(
+        _cisiphyus_root() / "artifacts" / "audit" / school_year / "audit_summary.json"
+    )
+    for path in candidates:
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
+def _year_metrics_from_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    import sys
+
+    audit_dir = Path(__file__).resolve().parents[1] / "audit"
+    if str(audit_dir) not in sys.path:
+        sys.path.insert(0, str(audit_dir))
+    import audit  # noqa: WPS433
+
+    results = {
+        "summary": payload.get("summary") or {},
+        "baseline_target_distribution": payload.get("baseline_target_distribution") or {},
+        "issue_code_counts": payload.get("issue_code_counts") or {},
+        "accepted_exception_counts": payload.get("accepted_exception_counts") or {},
+        "detail_rows": [{}] * int(payload.get("detail_row_count") or 0),
+    }
+    return audit.year_audit_metrics(results)
+
+
+def load_goal_metric_counts_by_year(
+    snapshots_dir: Path | None,
+    school_years: list[str],
+) -> dict[str, dict[str, int]]:
+    by_year: dict[str, dict[str, int]] = {}
+    for school_year in school_years:
+        payload = load_metrics_audit_payload(snapshots_dir, school_year)
+        if payload is None:
+            continue
+        metrics = _year_metrics_from_audit_payload(payload)
+        total = int(metrics.get("rows_evaluated", 0) or 0)
+        non_goals = int(metrics.get("accepted_supplemental", 0) or 0)
+        goals_with_baseline_target = int(
+            metrics.get("baseline_and_target_present", 0) or 0
+        )
+        goal_metrics_total = total - non_goals
+        if goal_metrics_total > 0:
+            by_year[school_year] = {
+                "goals_with_baseline_target": goals_with_baseline_target,
+                "goal_metrics_total": goal_metrics_total,
+            }
+    return by_year
+
+
+METRICS_AUDIT_PRIMARY_ROWS: tuple[tuple[str, str, bool], ...] = (
+    ("Student Metrics", "rows_evaluated", False),
+    ("Baseline + target present", "baseline_and_target_present", True),
+    ("Non-Compliant (Baseline without target)", "baseline_without_target_excl_supplemental", True),
+    ("Flagged rows", "rows_flagged", False),
+)
+
+METRICS_AUDIT_DETAIL_ROWS: tuple[tuple[str, str, bool], ...] = (
+    ("Excluded Exceptions (Non-Goal Metrics)", "accepted_supplemental", False),
+    ("Direction Mismatches", "direction_mismatches", False),
+    ("Scale Mismatches", "scale_mismatches", False),
+)
+
+
+def _metrics_audit_row_values(
+    row_defs: tuple[tuple[str, str, bool], ...],
+    *,
+    by_year: dict[str, dict[str, Any]],
+    present_years: list[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for label, metric_key, show_pct in row_defs:
+        values: dict[str, str] = {}
+        for school_year in present_years:
+            metrics = by_year[school_year]
+            raw = int(metrics.get(metric_key, 0) or 0)
+            rows_evaluated = int(metrics.get("rows_evaluated", 0) or 0)
+            if show_pct and rows_evaluated:
+                values[school_year] = f"{raw:,} ({round(100 * raw / rows_evaluated)}%)"
+            else:
+                values[school_year] = f"{raw:,}"
+        rows.append({"label": label, "values": values})
+    return rows
+
+
+def build_metrics_audit_cross_year_table(
+    snapshots_dir: Path | None,
+    school_years: list[str],
+) -> dict[str, Any]:
+    by_year: dict[str, dict[str, Any]] = {}
+    for school_year in school_years:
+        payload = load_metrics_audit_payload(snapshots_dir, school_year)
+        if payload is None:
+            continue
+        by_year[school_year] = _year_metrics_from_audit_payload(payload)
+    present_years = [year for year in school_years if year in by_year]
+    primary_rows = _metrics_audit_row_values(
+        METRICS_AUDIT_PRIMARY_ROWS,
+        by_year=by_year,
+        present_years=present_years,
+    )
+    detail_rows = _metrics_audit_row_values(
+        METRICS_AUDIT_DETAIL_ROWS,
+        by_year=by_year,
+        present_years=present_years,
+    )
+    return {
+        "school_years": present_years,
+        "rows": primary_rows + detail_rows,
+        "primary_rows": primary_rows,
+        "detail_rows": detail_rows,
+    }
+
+
+def _render_metrics_audit_body_rows(
+    rows: list[dict[str, Any]],
+    school_years: list[str],
+    *,
+    latest_year: str,
+    label_class: str = "",
+) -> str:
+    body_rows: list[str] = []
+    label_attr = f' class="{label_class}"' if label_class else ""
+    for row in rows:
+        cells = []
+        for school_year in school_years:
+            value = (row.get("values") or {}).get(school_year, "n/a")
+            cell_class = ' class="latest-col"' if school_year == latest_year else ""
+            cells.append(f"<td{cell_class}>{value}</td>")
+        body_rows.append(f"<tr><td{label_attr}>{row['label']}</td>{''.join(cells)}</tr>")
+    return "".join(body_rows)
+
+
+def render_metrics_audit_cross_year_table(table: dict[str, Any]) -> str:
+    school_years = table.get("school_years") or []
+    primary_rows = table.get("primary_rows") or table.get("rows") or []
+    detail_rows = table.get("detail_rows") or []
+    if not school_years or not primary_rows:
+        return ""
+    latest_year = school_years[-1]
+    header_cells = "".join(
+        f'<th class="latest-col">{year}</th>' if year == latest_year else f"<th>{year}</th>"
+        for year in school_years
+    )
+    primary_body = _render_metrics_audit_body_rows(
+        primary_rows, school_years, latest_year=latest_year
+    )
+    detail_body = ""
+    if detail_rows:
+        detail_body = _render_metrics_audit_body_rows(
+            detail_rows,
+            school_years,
+            latest_year=latest_year,
+            label_class="metrics-audit-detail-label",
+        )
+    colgroup = (
+        f'<colgroup><col class="metrics-audit-label-col">'
+        f'<col span="{len(school_years)}"></colgroup>'
+    )
+    return f"""
+  <table class="metrics-audit-table">
+    {colgroup}
+    <thead><tr><th>Metric</th>{header_cells}</tr></thead>
+    <tbody>{primary_body}{detail_body}</tbody>
+  </table>
+"""
 
 
 def resolve_goal_achievement_audit_dir(explicit: Path | None = None) -> Path | None:
@@ -195,6 +377,9 @@ def resolve_goal_achievement_audit_dir(explicit: Path | None = None) -> Path | N
     cisiphyus_root = Path(
         os.environ.get("CISIPHYUS_ROOT", str(Path(__file__).resolve().parents[2]))
     )
+    generated = cisiphyus_root / "artifacts" / "goal_achievement_audit"
+    if generated.is_dir():
+        return generated
     candidate = (
         cisiphyus_root.parent.parent
         / "evaluation"
@@ -202,12 +387,80 @@ def resolve_goal_achievement_audit_dir(explicit: Path | None = None) -> Path | N
         / "Audits"
         / "Goal Achievement"
     )
-    return candidate if candidate.is_dir() else None
+    return candidate if candidate.is_dir() else generated
 
 
-def load_goal_achievement_year(audit_dir: Path, school_year: str) -> dict[str, Any] | None:
-    path = audit_dir / f"{school_year}_GoalAchievement_AUDIT.csv"
-    if not path.is_file():
+def _cisiphyus_goal_achievement_audit_dir() -> Path:
+    cisiphyus_root = Path(
+        os.environ.get("CISIPHYUS_ROOT", str(Path(__file__).resolve().parents[2]))
+    )
+    return cisiphyus_root / "artifacts" / "goal_achievement_audit"
+
+
+def materialize_goal_achievement_audit_csv(school_year: str) -> Path | None:
+    output_dir = _cisiphyus_goal_achievement_audit_dir()
+    output_path = output_dir / f"{school_year}_GoalAchievement_AUDIT.csv"
+    if output_path.is_file():
+        return output_path
+
+    import sys
+
+    audit_dir = Path(__file__).resolve().parents[1] / "audit"
+    goal_achievement_dir = Path(__file__).resolve().parents[1] / "goal_achievement"
+    for path in (audit_dir, goal_achievement_dir):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+    import audit  # noqa: WPS433
+
+    workbook = audit.resolve_goal_progress_workbook(school_year)
+    if workbook is None:
+        return None
+
+    records = audit.load_goal_progress_gar_records(workbook)
+    if not records:
+        return None
+
+    excluded = audit.resolve_ewgspe_only_student_ids(
+        school_year,
+        goal_progress_workbook=workbook,
+    )
+    if excluded:
+        records = [
+            record
+            for record in records
+            if (audit.clean_value(str(record.get("Student ID") or "")) or "") not in excluded
+        ]
+
+    context: dict[str, str] = {}
+    exception_rows = audit.gar_build_exception_rows(records, context)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    audit.gar_write_csv_report(exception_rows, output_path)
+    return output_path
+
+
+def resolve_goal_achievement_audit_csv(
+    audit_dir: Path | None,
+    school_year: str,
+) -> Path | None:
+    candidates: list[Path] = []
+    if audit_dir is not None:
+        candidates.append(audit_dir / f"{school_year}_GoalAchievement_AUDIT.csv")
+    generated_dir = _cisiphyus_goal_achievement_audit_dir()
+    if audit_dir is None or audit_dir.resolve() != generated_dir.resolve():
+        candidates.append(generated_dir / f"{school_year}_GoalAchievement_AUDIT.csv")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return materialize_goal_achievement_audit_csv(school_year)
+
+
+def load_goal_achievement_year(
+    audit_dir: Path | None,
+    school_year: str,
+) -> dict[str, Any] | None:
+    path = resolve_goal_achievement_audit_csv(audit_dir, school_year)
+    if path is None:
         return None
     with path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -328,11 +581,7 @@ def build_cross_year_aggregates(
         all_exception_types: set[str] = set()
         year_exception_types: list[dict[str, int]] = []
         for school_year in eoy_categories:
-            gar = (
-                load_goal_achievement_year(goal_achievement_audit_dir, school_year)
-                if goal_achievement_audit_dir
-                else None
-            )
+            gar = load_goal_achievement_year(goal_achievement_audit_dir, school_year)
             if gar:
                 exception_count_series.append(int(gar["total"]))
                 schools_with_exceptions_series.append(len(gar.get("school_counts", {})))
@@ -345,7 +594,7 @@ def build_cross_year_aggregates(
                 exception_count_series.append(None)
                 schools_with_exceptions_series.append(None)
                 year_exception_types.append({})
-                if goal_achievement_audit_dir is not None:
+                if resolve_goal_achievement_audit_csv(goal_achievement_audit_dir, school_year) is None:
                     missing_goal_achievement_years.append(school_year)
             issue_counts = load_eoy_global_issue_counts(snapshots_dir, school_year)
             for metric in GLOBAL_METRICS:
@@ -489,11 +738,16 @@ def build_cross_year_aggregates(
             "pair_label": (latest_headline or {}).get("pair_label", ""),
         }
 
+    goal_metric_counts = load_goal_metric_counts_by_year(snapshots_dir, eoy_categories)
     eoy_exception_summary = build_eoy_exception_summary(
         eoy_categories,
         exception_count_series,
-        rows_evaluated_series,
         schools_with_exceptions_series,
+        goal_metric_counts=goal_metric_counts,
+    )
+    metrics_audit_cross_year = build_metrics_audit_cross_year_table(
+        snapshots_dir,
+        eoy_categories,
     )
 
     return {
@@ -508,6 +762,7 @@ def build_cross_year_aggregates(
         "school_leaderboard": school_leaderboard,
         "latest_headline": latest_headline,
         "eoy_exception_summary": eoy_exception_summary,
+        "metrics_audit_cross_year": metrics_audit_cross_year,
         "goal_progress_transitions": goal_progress_transitions,
         "goal_on_track_series": goal_on_track_series,
         "goal_off_track_series": goal_off_track_series,
@@ -526,22 +781,22 @@ def build_cross_year_aggregates(
 def build_eoy_exception_summary(
     eoy_categories: list[str],
     exception_count_series: list[int | None],
-    rows_evaluated_series: list[int | None],
     schools_with_exceptions_series: list[int | None],
+    *,
+    goal_metric_counts: dict[str, dict[str, int]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     prior_exceptions: int | None = None
+    counts_by_year = goal_metric_counts or {}
     for index, school_year in enumerate(eoy_categories):
         exceptions = (
             exception_count_series[index]
             if index < len(exception_count_series)
             else None
         )
-        rows_evaluated = (
-            rows_evaluated_series[index]
-            if index < len(rows_evaluated_series)
-            else None
-        )
+        year_counts = counts_by_year.get(school_year, {})
+        goals_with_baseline_target = year_counts.get("goals_with_baseline_target")
+        goal_metrics_total = year_counts.get("goal_metrics_total")
         schools_with_exceptions = (
             schools_with_exceptions_series[index]
             if index < len(schools_with_exceptions_series)
@@ -552,12 +807,23 @@ def build_eoy_exception_summary(
             exception_delta = exceptions - prior_exceptions
         if exceptions is not None:
             prior_exceptions = exceptions
+        goals_pct = None
+        if (
+            isinstance(goals_with_baseline_target, int)
+            and isinstance(goal_metrics_total, int)
+            and goal_metrics_total
+        ):
+            goals_pct = round(
+                100 * goals_with_baseline_target / goal_metrics_total
+            )
         rows.append(
             {
                 "school_year": school_year,
                 "exceptions": exceptions,
                 "exception_delta": exception_delta,
-                "rows_evaluated": rows_evaluated,
+                "goals_with_baseline_target": goals_with_baseline_target,
+                "goals_with_baseline_target_pct": goals_pct,
+                "goal_metrics_total": goal_metrics_total,
                 "schools_with_exceptions": schools_with_exceptions,
             }
         )
@@ -894,6 +1160,11 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     )
 
     audit_headline_html = ""
+    gar_exception_summary_html = ""
+    metrics_audit_table = aggregates.get("metrics_audit_cross_year") or {}
+    metrics_audit_html = render_metrics_audit_cross_year_table(metrics_audit_table)
+    if metrics_audit_html:
+        audit_headline_html = metrics_audit_html
     if eoy_exception_summary:
         latest_year = eoy_categories[-1] if eoy_categories else ""
         summary_table_rows = []
@@ -911,12 +1182,16 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
             else:
                 delta_class = ""
                 delta_text = "n/a"
-            rows_evaluated = row.get("rows_evaluated")
-            rows_text = (
-                f"{rows_evaluated:,}"
-                if isinstance(rows_evaluated, int)
-                else "n/a"
-            )
+            rows_evaluated = row.get("goals_with_baseline_target", row.get("rows_evaluated"))
+            goals_pct = row.get("goals_with_baseline_target_pct")
+            if isinstance(rows_evaluated, int):
+                rows_text = (
+                    f"{rows_evaluated:,} ({goals_pct}%)"
+                    if isinstance(goals_pct, int)
+                    else f"{rows_evaluated:,}"
+                )
+            else:
+                rows_text = "n/a"
             schools = row.get("schools_with_exceptions")
             schools_text = schools if isinstance(schools, int) else "n/a"
             summary_table_rows.append(
@@ -926,12 +1201,15 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
                 f"<td>{rows_text}</td>"
                 f"<td>{schools_text}</td></tr>"
             )
-        audit_headline_html = f"""
+        gar_exception_summary_html = f"""
   <table>
-    <thead><tr><th>School Year</th><th>Exceptions</th><th>Change vs prior EOY</th><th>Goals with baseline and target</th><th>Schools with exceptions</th></tr></thead>
+    <thead><tr><th>School Year</th><th>Goal achievement exceptions</th><th>Change vs prior EOY</th><th>Baseline + target present (% of goal metrics)</th><th>Schools with exceptions</th></tr></thead>
     <tbody>{"".join(summary_table_rows)}</tbody>
   </table>
 """
+        if not metrics_audit_html:
+            audit_headline_html = gar_exception_summary_html
+            gar_exception_summary_html = ""
 
     goal_headline_html = ""
     if goal_headline:
@@ -945,15 +1223,19 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
           <div class="stat"><div class="stat-value">{goal_headline.get("rows_improved", 0)}</div><div class="stat-label">Goals improved</div></div>
           <div class="stat"><div class="stat-value danger">{goal_headline.get("rows_worsened", 0)}</div><div class="stat-label">Goals fell behind</div></div>
         </section>
-        <p class="caption">{goal_headline.get("pair_label", "")} · {goals_tracked:,} student goal rows with Baseline and Target · improved/fell behind = same student, school, goal, and metric year over year</p>
+        <p class="caption">{goal_headline.get("pair_label", "")} · {goals_tracked:,} student goal rows with baseline and target (audit scope) · on-track % = on track ÷ (on track + off track) · improved/fell behind = same student, school, goal, and metric year over year</p>
         """
 
     caveats: list[str] = [
         "<strong>Different rosters each year:</strong> each School Year EOY Student "
-        "Metrics file has its own student list. Exception counts are not the same "
+        "Metrics file has its own student list. Year-over-year counts are not the same "
         "students followed year over year.",
-        "<strong>Exception:</strong> a goal progress row where recorded Goal Achievement "
-        "does not match what baseline, target, and achieved value imply, or needs manual review.",
+        "<strong>Audit flag:</strong> a Student Metrics row flagged by "
+        "<code>cisiphyus audit metrics</code> (direction mismatch, scale mismatch, "
+        "partial goal, etc.).",
+        "<strong>Goal achievement exception:</strong> a goal progress row where recorded "
+        "Goal Achievement does not match what baseline, target, and achieved value imply, "
+        "or needs manual review.",
         "<strong>Goal progress:</strong> the only section that matches the same "
         "student + school + goal + metric across years (see caveats below).",
     ]
@@ -1040,6 +1322,13 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     .legend {{ font: 11px system-ui; text-anchor: end; }}
     .data-label {{ font: 10px system-ui; fill: #1f2328; }}
     .grid-line {{ stroke: #d0d7de; stroke-width: 1; }}
+    .metrics-audit-table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; table-layout: fixed; }}
+    .metrics-audit-table th, .metrics-audit-table td {{ border: 1px solid #d0d7de; padding: 0.45rem 0.6rem; text-align: right; }}
+    .metrics-audit-table th:first-child, .metrics-audit-table td:first-child {{ text-align: left; }}
+    .metrics-audit-table tbody td:first-child:not(.metrics-audit-detail-label) {{ font-weight: 600; }}
+    .metrics-audit-label-col {{ width: 30%; }}
+    .metrics-audit-detail-label {{ padding-left: 1.5rem; color: #57606a; }}
+    .metrics-audit-table .latest-col {{ background: #fff8c5; }}
   </style>
 </head>
 <body>
@@ -1050,7 +1339,8 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     <strong>Read this first</strong>
     <ul>
       <li>Each School Year has its <strong>own Student Metrics roster</strong>. Students enter, exit, and change schools — the lists are not the same year to year.</li>
-      <li><strong>Exception</strong> — a goal progress row where recorded Goal Achievement does not match the expected result from baseline, target, and achieved value, or needs manual review. Source: Goal Achievement audit CSVs.</li>
+      <li><strong>Audit flag</strong> — a Student Metrics row flagged by <code>cisiphyus audit metrics</code>.</li>
+      <li><strong>Goal achievement exception</strong> — recorded Goal Achievement does not match expected logic from baseline, target, and achieved value, or needs manual review. Source: Goal Achievement audit CSVs.</li>
       <li><strong>On track</strong> (goal section) — Baseline and Target set; latest Grading Period meets Target (Progress Against Goal).</li>
     </ul>
   </div>
@@ -1061,9 +1351,13 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
 {caveats_html}    </ul>
   </div>
 
-  <h2>Goal achievement exceptions</h2>
-  <p class="caption">Goal progress rows where recorded Goal Achievement does not match expected logic — from Goal Achievement audit exports</p>
+  <h2>Student metrics audit</h2>
+  <p class="caption">Cumulative Student Metrics Summary audit at each School Year EOY — same counts as <code>cisiphyus audit metrics --year all</code></p>
   {audit_headline_html}
+
+  <h2>Goal achievement exceptions</h2>
+  <p class="caption">Goal progress rows where recorded Goal Achievement does not match expected logic — from Goal Achievement audit exports. Baseline + target % uses goal metrics only (excludes supplemental non-goal rows).</p>
+  {gar_exception_summary_html}
 
   <h3>Total exceptions over time</h3>
   <p class="caption">Count of goal achievement mismatches and manual-review rows at each School Year EOY</p>
