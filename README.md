@@ -78,10 +78,26 @@ cisiphyus audit accreditation
 ```
 
 **Audit Student Metrics**
-> Retrieve `student_metrics_summary` and flag row-level data-quality issues.
+> Retrieve `student_metrics_summary` and flag row-level data-quality issues (ABC domain, scales, progress structure). Use this for accreditation metric QA — not goal-achievement outcome labels.
 
 ```bash
 cisiphyus audit metrics
+```
+
+**Audit Goal Achievement**
+> Runs GAR logic in `examples/audit/audit.py` on `goal_tracking_student_goals` (`CIS_StudentProgress_Detail`), then cross-checks accreditation `Accreditation Student Drilldown` against `student_metrics_summary`. Use `audit metrics` for row-level metric QA.
+
+```bash
+cisiphyus pull goal_tracking_student_goals --school-year SY25-26
+cisiphyus audit goal-achievement
+cisiphyus audit goal-achievement --school-year SY25-26
+```
+
+**Goal Achievement Summary (aggregate only)**
+> Rollup counts by goal area (sheet `CIS_GoalAchievement_Summary`, FormID `1000002372`).
+
+```bash
+cisiphyus pull goal_achievement
 ```
 
 **Provision Quarterly Progress Reports**

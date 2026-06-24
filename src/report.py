@@ -162,7 +162,7 @@ def run_report(
         )
         output_dir, raw_path = _resolve_output_paths(
             report_id,
-            school_year=resolved_school_year,
+            school_year=school_year or resolved_school_year,
             default_school_year=default_school_year,
         )
         context_url = _resolve_context_url(report_id, profile)
@@ -201,7 +201,7 @@ def run_report(
             raw_path=raw_path,
             error=None,
             latest_dir=output_dir,
-            school_year=resolved_school_year,
+            school_year=school_year or resolved_school_year,
             enrollment_program_id=enrollment_program_id,
         )
     except fetch.FetchFailedError as exc:

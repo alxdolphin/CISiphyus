@@ -8,18 +8,23 @@ from pathlib import Path
 AUDIT_USAGE = """usage: cisiphyus audit <target> [options]
 
 targets:
-  accreditation   Site-level accreditation compliance monitoring
-  metrics         Student metrics summary row-level audit
+  accreditation      Site-level accreditation compliance monitoring
+  metrics            Student metrics summary row-level audit
+  goal-achievement   Goal achievement audit (GAR on goal tracking + drilldown)
 """
 
 TREND_USAGE = """usage: cisiphyus trend <school-year> [school-year ...] [options]
+       cisiphyus trend cross-year [options]
 
 Discover available reporting periods, capture snapshots, and compare consecutive quarters.
+Regenerate the cross-year EOY HTML report with `cross-year` (alias: `eoy`).
 
 examples:
   cisiphyus trend SY25-26
   cisiphyus trend SY25-26 SY24-25
   cisiphyus trend --all
+  cisiphyus trend cross-year
+  cisiphyus trend eoy
 """
 
 
@@ -58,6 +63,17 @@ def run_metrics_audit(argv: list[str]) -> int:
     )
 
 
+def run_goal_achievement_audit(argv: list[str]) -> int:
+    audit_dir = repo_root() / "examples" / "audit"
+    goal_dir = repo_root() / "examples" / "goal_achievement"
+    accred_dir = repo_root() / "examples" / "accreditation"
+    for path in (audit_dir, goal_dir, accred_dir):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+    module = __import__("goal_achievement_audit")
+    return int(module.main(argv))
+
+
 def run_audit_app(argv: list[str]) -> int:
     if not argv or argv[0] in ("--help", "-h"):
         print(AUDIT_USAGE, file=sys.stderr)
@@ -69,8 +85,14 @@ def run_audit_app(argv: list[str]) -> int:
         return run_accreditation_monitor(rest)
     if target == "metrics":
         return run_metrics_audit(rest)
+    if target == "goal-achievement":
+        return run_goal_achievement_audit(rest)
 
-    print(f"Error: unknown audit target {target!r}. Use 'accreditation' or 'metrics'.", file=sys.stderr)
+    print(
+        f"Error: unknown audit target {target!r}. "
+        "Use 'accreditation', 'metrics', or 'goal-achievement'.",
+        file=sys.stderr,
+    )
     print(AUDIT_USAGE, file=sys.stderr)
     return 1
 
@@ -99,6 +121,8 @@ def run_trend(argv: list[str]) -> int:
     if str(example_dir) not in sys.path:
         sys.path.insert(0, str(example_dir))
     trends = __import__("trends")
+    if argv[0] in trends.CROSS_YEAR_REPORT_ALIASES:
+        return int(trends.main_cross_year(argv[1:]))
     return int(trends.main_trend(argv))
 
 

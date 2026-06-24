@@ -60,3 +60,4 @@ tests/*
 docs/
 examples/accreditation/local_inputs/monitor-out/monitoring_summary.json
 examples/accreditation/local_inputs/monitor-out/monitoring_summary.md
+uv.lock

@@ -74,6 +74,14 @@ MOVEMENT_FIELDS = (
     "is_regression",
 )
 
+GOAL_PROGRESS_STATUS_ORDER = audit.PROGRESS_STATUS_ORDER
+PROGRESS_STATUS_RANK = {
+    "on_track": 2,
+    "off_track": 1,
+    "no_progress_data": 0,
+    "indeterminate": 0,
+}
+
 
 def default_inputs_dir() -> Path:
     explicit = (os.environ.get("TREND_INPUTS_DIR") or "").strip()
@@ -190,6 +198,7 @@ def pull_school_year_backfill(
     *,
     inputs_dir: Path,
     force_fetch: bool,
+    include_accreditation: bool | None = None,
 ) -> int:
     cached = school_year_metrics_cached(school_year, inputs_dir=inputs_dir)
     if cached is not None and not force_fetch:
@@ -205,8 +214,10 @@ def pull_school_year_backfill(
             acc_path, met_path = pull_workbooks(
                 school_year=school_year,
                 force_fetch=True,
+                include_accreditation=include_accreditation,
             )
-            shutil.copy2(acc_path, dest_dir / "accreditation.xlsx")
+            if acc_path is not None:
+                shutil.copy2(acc_path, dest_dir / "accreditation.xlsx")
             shutil.copy2(met_path, metrics_dest)
         else:
             print(
@@ -251,6 +262,7 @@ def run_eoy_backfill_and_snapshot(
     snapshots_dir: Path,
     force_fetch: bool,
     force: bool,
+    include_accreditation: bool | None = None,
 ) -> tuple[int, str]:
     cached = school_year_metrics_cached(school_year, inputs_dir=inputs_dir)
     slot = snapshot_slot(snapshots_dir, school_year, FALLBACK_PERIOD)
@@ -259,6 +271,7 @@ def run_eoy_backfill_and_snapshot(
             school_year,
             inputs_dir=inputs_dir,
             force_fetch=force_fetch,
+            include_accreditation=include_accreditation,
         )
         if code != 0:
             return 1, "failed"
@@ -337,13 +350,13 @@ def resolve_period_workbooks(
     period: str,
     *,
     inputs_dir: Path,
-) -> tuple[Path, Path] | None:
+) -> tuple[Path | None, Path] | None:
     period_dir = inputs_dir / school_year / period
     if not period_dir.is_dir():
         return None
     acc = _find_workbook(period_dir, ACCREDITATION_CANDIDATES, ("*accreditation*.xlsx",))
     met = _find_workbook(period_dir, (), METRICS_GLOBS)
-    if acc is None or met is None:
+    if met is None:
         return None
     return acc, met
 
@@ -351,30 +364,52 @@ def resolve_period_workbooks(
 def archive_workbooks(
     school_year: str,
     period: str,
-    acc_wb: Path,
+    acc_wb: Path | None,
     met_wb: Path,
     *,
     inputs_dir: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path | None, Path]:
     dest_dir = inputs_dir / school_year / period
     dest_dir.mkdir(parents=True, exist_ok=True)
-    acc_dest = dest_dir / acc_wb.name
-    met_dest = dest_dir / met_wb.name
-    shutil.copy2(acc_wb, acc_dest)
+    met_dest = dest_dir / "metrics.xlsx"
     shutil.copy2(met_wb, met_dest)
+    if acc_wb is None:
+        return None, met_dest.resolve()
+    acc_dest = dest_dir / acc_wb.name
+    shutil.copy2(acc_wb, acc_dest)
     return acc_dest.resolve(), met_dest.resolve()
 
 
-def pull_workbooks(*, school_year: str, force_fetch: bool) -> tuple[Path, Path]:
-    print(
-        f"[trend] pulling accreditation and student metrics from CISDM ({school_year})",
-        file=sys.stderr,
-    )
+def accreditation_fetch_requested(*, explicit: bool | None = None) -> bool:
+    if explicit is not None:
+        return explicit
+    return accreditation._flag_true(os.environ.get("ACCREDITATION_FETCH_FROM_CISDM"))
+
+
+def pull_workbooks(
+    *,
+    school_year: str,
+    force_fetch: bool,
+    include_accreditation: bool | None = None,
+) -> tuple[Path | None, Path]:
+    include_accreditation = accreditation_fetch_requested(explicit=include_accreditation)
+    if include_accreditation:
+        print(
+            f"[trend] pulling accreditation and student metrics from CISDM ({school_year})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[trend] pulling student metrics from CISDM ({school_year}); "
+            "skip accreditation (ACCREDITATION_FETCH_FROM_CISDM=1 or --accreditation)",
+            file=sys.stderr,
+        )
     return _resolve_workbooks(
         accreditation_workbook=None,
         metrics_workbook=None,
         school_year=school_year,
         force_fetch=force_fetch,
+        include_accreditation=include_accreditation,
     )
 
 
@@ -383,10 +418,10 @@ def workbooks_for_period(
     period: str,
     *,
     inputs_dir: Path,
-    pulled: tuple[Path, Path] | None,
+    pulled: tuple[Path | None, Path] | None,
     latest_pull_period: str | None,
     force_fetch: bool,
-) -> tuple[Path, Path] | None:
+) -> tuple[Path | None, Path] | None:
     cached = resolve_period_workbooks(school_year, period, inputs_dir=inputs_dir)
     if cached and not force_fetch:
         return cached
@@ -413,6 +448,7 @@ def run_trend_school_year(
     skip_compare: bool = False,
     regression_threshold: float = 0.01,
     skip_empty_periods: bool = False,
+    include_accreditation: bool | None = None,
 ) -> tuple[int, str]:
     manifest = load_manifest(snapshots_dir)
     snapshotted = {
@@ -449,6 +485,7 @@ def run_trend_school_year(
             snapshots_dir=snapshots_dir,
             force_fetch=force_fetch,
             force=force,
+            include_accreditation=include_accreditation,
         )
 
     need_capture = [
@@ -457,7 +494,7 @@ def run_trend_school_year(
         if period not in snapshotted or force
     ]
     latest_pull_period: str | None = None
-    pulled: tuple[Path, Path] | None = None
+    pulled: tuple[Path | None, Path] | None = None
     if need_capture:
         missing_cache = [
             period
@@ -470,6 +507,7 @@ def run_trend_school_year(
                 pulled = pull_workbooks(
                     school_year=school_year,
                     force_fetch=force_fetch or bool(missing_cache),
+                    include_accreditation=include_accreditation,
                 )
             except (FileNotFoundError, OSError, RuntimeError) as exc:
                 print(f"error: CISDM pull failed: {exc}", file=sys.stderr)
@@ -514,6 +552,7 @@ def run_trend_school_year(
                 metrics_workbook=met_wb,
                 force_fetch=False,
                 force=force,
+                metrics_only=acc_wb is None,
             )
         except (FileExistsError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
             print(f"error: {school_year}/{period}: {exc}", file=sys.stderr)
@@ -598,6 +637,21 @@ def snapshot_slot(snapshots_dir: Path, school_year: str, period: str) -> Path:
     return snapshots_dir / school_year / period
 
 
+def discover_eoy_snapshot_years(snapshots_dir: Path) -> list[str]:
+    """School years that have a captured EOY snapshot directory."""
+    if not snapshots_dir.is_dir():
+        return []
+    years: list[str] = []
+    for entry in snapshots_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / FALLBACK_PERIOD).is_dir():
+            years.append(entry.name)
+    import config
+
+    return sorted(years, key=config._school_year_sort_key)
+
+
 def build_school_rollup(detail_rows: list[dict[str, Any]]) -> dict[str, Any]:
     schools: dict[str, dict[str, Any]] = {}
     for row in detail_rows:
@@ -623,13 +677,18 @@ def _resolve_workbooks(
     metrics_workbook: Path | None,
     school_year: str | None = None,
     force_fetch: bool,
-) -> tuple[Path, Path]:
-    if accreditation_workbook and metrics_workbook:
-        return accreditation_workbook.resolve(), metrics_workbook.resolve()
+    include_accreditation: bool = True,
+) -> tuple[Path | None, Path]:
+    if metrics_workbook is not None:
+        met_path = metrics_workbook.resolve()
+        if accreditation_workbook is not None:
+            return accreditation_workbook.resolve(), met_path
+        if not include_accreditation:
+            return None, met_path
 
     acc_path = accreditation_workbook
     met_path = metrics_workbook
-    if acc_path is None:
+    if include_accreditation and acc_path is None:
         destination = accreditation.preferred_accreditation_workbook()
         fetch = accreditation.fetch_accreditation_workbook(
             destination=destination,
@@ -640,7 +699,7 @@ def _resolve_workbooks(
             raise FileNotFoundError(f"accreditation workbook unavailable at {destination}")
         acc_path = fetch.destination
     if met_path is None:
-        destination = audit.preferred_student_metrics_workbook()
+        destination = audit.preferred_student_metrics_workbook(school_year=school_year)
         fetch = audit.fetch_student_metrics_workbook(
             destination=destination,
             force_fetch=force_fetch,
@@ -650,7 +709,10 @@ def _resolve_workbooks(
         if not fetch.succeeded:
             raise FileNotFoundError(f"student metrics workbook unavailable at {destination}")
         met_path = fetch.destination
-    return acc_path.resolve(), met_path.resolve()
+    return (
+        acc_path.resolve() if acc_path is not None else None,
+        met_path.resolve(),
+    )
 
 
 def load_manifest(snapshots_dir: Path) -> dict[str, Any]:
@@ -694,7 +756,7 @@ def capture_snapshot(
             force_fetch=force_fetch,
         )
     monitor_cfg = monitor_config or accreditation.MonitorConfig()
-    audit_cfg = audit_config or audit.AuditConfig()
+    audit_cfg = audit_config or audit.AuditConfig(school_year=school_year)
 
     if acc_wb is not None:
         acc_results = accreditation.evaluate_workbook(acc_wb, monitor_cfg)
@@ -709,6 +771,7 @@ def capture_snapshot(
     )
     school_rollup = build_school_rollup(met_results.get("detail_rows") or [])
     grading_period_stats = audit.grading_period_fill_stats(met_wb, audit_cfg.sheet_name)
+    progress_payload = met_results["progress_rollup"]
 
     if slot.exists() and force:
         shutil.rmtree(slot)
@@ -721,10 +784,12 @@ def capture_snapshot(
     met_json = met_dir / "audit_summary.json"
     rollup_json = met_dir / "school_rollup.json"
     grading_json = met_dir / "grading_period_stats.json"
+    progress_json = met_dir / "progress_rollup.json"
     _write_json(acc_json, acc_payload)
     _write_json(met_json, met_payload)
     _write_json(rollup_json, school_rollup)
     _write_json(grading_json, grading_period_stats)
+    _write_json(progress_json, progress_payload)
     if acc_wb is not None:
         accreditation.write_csv(acc_dir / "all_flags.csv", acc_results["all_flags"])
 
@@ -745,6 +810,7 @@ def capture_snapshot(
             "metrics/audit_summary.json": _file_hash(met_json),
             "metrics/school_rollup.json": _file_hash(rollup_json),
             "metrics/grading_period_stats.json": _file_hash(grading_json),
+            "metrics/progress_rollup.json": _file_hash(progress_json),
         },
     }
     _write_json(slot / "snapshot.json", meta)
@@ -1031,6 +1097,147 @@ def _compare_metrics(
     return rows
 
 
+def _progress_counts(rollup: dict[str, Any]) -> dict[str, int]:
+    global_counts = rollup.get("global") or {}
+    return {
+        status: int(global_counts.get(status, 0))
+        for status in GOAL_PROGRESS_STATUS_ORDER
+    }
+
+
+def _progress_on_track_pct(rollup: dict[str, Any]) -> float | None:
+    counts = _progress_counts(rollup)
+    tracked = counts["on_track"] + counts["off_track"]
+    if tracked == 0:
+        return None
+    return round(100 * counts["on_track"] / tracked, 1)
+
+
+def _compare_goal_progress(
+    base_rollup: dict[str, Any],
+    curr_rollup: dict[str, Any],
+) -> dict[str, Any]:
+    movements: list[dict[str, Any]] = []
+    base_index = base_rollup.get("progress_index") or {}
+    curr_index = curr_rollup.get("progress_index") or {}
+
+    for metric in ("on_track", "off_track"):
+        bv = int((base_rollup.get("global") or {}).get(metric, 0))
+        cv = int((curr_rollup.get("global") or {}).get(metric, 0))
+        if bv == cv:
+            continue
+        is_regression = (metric == "on_track" and cv < bv) or (metric == "off_track" and cv > bv)
+        movements.append(
+            _movement_row(
+                stream="goal_progress",
+                entity_key="global",
+                entity_label="global",
+                metric=metric,
+                baseline=bv,
+                current=cv,
+                movement_type=f"goal_{metric}_delta",
+                is_regression=is_regression,
+            )
+        )
+
+    row_level = {
+        "improved": 0,
+        "worsened": 0,
+        "unchanged": 0,
+        "appeared": 0,
+        "dropped": 0,
+    }
+    all_keys = sorted(set(base_index) | set(curr_index))
+    for key in all_keys:
+        base_status = base_index.get(key)
+        curr_status = curr_index.get(key)
+        if base_status is None:
+            row_level["appeared"] += 1
+            continue
+        if curr_status is None:
+            row_level["dropped"] += 1
+            continue
+        base_rank = PROGRESS_STATUS_RANK.get(str(base_status), 0)
+        curr_rank = PROGRESS_STATUS_RANK.get(str(curr_status), 0)
+        if curr_rank > base_rank:
+            row_level["improved"] += 1
+            movements.append(
+                _movement_row(
+                    stream="goal_progress",
+                    entity_key=key,
+                    entity_label=key.split("|", 2)[1] if "|" in key else key,
+                    metric="progress_status",
+                    baseline=base_status,
+                    current=curr_status,
+                    movement_type="progress_improved",
+                    is_regression=False,
+                )
+            )
+        elif curr_rank < base_rank:
+            row_level["worsened"] += 1
+            movements.append(
+                _movement_row(
+                    stream="goal_progress",
+                    entity_key=key,
+                    entity_label=key.split("|", 2)[1] if "|" in key else key,
+                    metric="progress_status",
+                    baseline=base_status,
+                    current=curr_status,
+                    movement_type="progress_worsened",
+                    is_regression=True,
+                )
+            )
+        else:
+            row_level["unchanged"] += 1
+
+    regressions = [row for row in movements if row.get("is_regression")]
+    school_changes: list[dict[str, Any]] = []
+    base_schools = base_rollup.get("schools") or {}
+    curr_schools = curr_rollup.get("schools") or {}
+    for school in sorted(set(base_schools) | set(curr_schools)):
+        base_pct = _school_on_track_pct(base_schools.get(school, {}))
+        curr_pct = _school_on_track_pct(curr_schools.get(school, {}))
+        if base_pct is None or curr_pct is None:
+            continue
+        school_changes.append(
+            {
+                "school": school,
+                "baseline_on_track_pct": base_pct,
+                "current_on_track_pct": curr_pct,
+                "delta_pct": round(curr_pct - base_pct, 1),
+            }
+        )
+    school_changes.sort(key=lambda row: row["delta_pct"])
+
+    return {
+        "baseline": {
+            "global": _progress_counts(base_rollup),
+            "eligible_rows": int(base_rollup.get("eligible_rows", 0)),
+            "on_track_pct": _progress_on_track_pct(base_rollup),
+        },
+        "current": {
+            "global": _progress_counts(curr_rollup),
+            "eligible_rows": int(curr_rollup.get("eligible_rows", 0)),
+            "on_track_pct": _progress_on_track_pct(curr_rollup),
+        },
+        "movement_count": len(movements),
+        "regression_count": len(regressions),
+        "row_level": row_level,
+        "school_changes": school_changes,
+        "movements": movements,
+        "regressions": regressions,
+    }
+
+
+def _school_on_track_pct(school_counts: dict[str, Any]) -> float | None:
+    on_track = int(school_counts.get("on_track", 0))
+    off_track = int(school_counts.get("off_track", 0))
+    tracked = on_track + off_track
+    if tracked == 0:
+        return None
+    return round(100 * on_track / tracked, 1)
+
+
 def _snapshot_compare_warnings(base_slot: Path, curr_slot: Path) -> list[str]:
     warnings: list[str] = []
     base_meta_path = base_slot / "snapshot.json"
@@ -1059,13 +1266,15 @@ def _snapshot_compare_warnings(base_slot: Path, curr_slot: Path) -> list[str]:
 
 def load_snapshot_payloads(
     slot: Path,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, int], dict[str, Any]]:
     acc = _load_json(slot / "accreditation" / "monitoring_summary.json")
     met = _load_json(slot / "metrics" / "audit_summary.json")
     rollup = _load_json(slot / "metrics" / "school_rollup.json")
     grading_path = slot / "metrics" / "grading_period_stats.json"
     grading = _load_json(grading_path) if grading_path.is_file() else {}
-    return acc, met, rollup, grading
+    progress_path = slot / "metrics" / "progress_rollup.json"
+    progress = _load_json(progress_path) if progress_path.is_file() else {}
+    return acc, met, rollup, grading, progress
 
 
 def _compare_snapshot_slots(
@@ -1085,8 +1294,8 @@ def _compare_snapshot_slots(
     if not curr_slot.is_dir():
         raise FileNotFoundError(f"current snapshot not found: {curr_slot}")
 
-    base_acc, base_met, base_rollup, base_gp = load_snapshot_payloads(base_slot)
-    curr_acc, curr_met, curr_rollup, curr_gp = load_snapshot_payloads(curr_slot)
+    base_acc, base_met, base_rollup, base_gp, base_progress = load_snapshot_payloads(base_slot)
+    curr_acc, curr_met, curr_rollup, curr_gp, curr_progress = load_snapshot_payloads(curr_slot)
     warnings = _snapshot_compare_warnings(base_slot, curr_slot)
     for warning in warnings:
         print(f"warning: {school_year} {baseline_period} vs {current_period}: {warning}", file=sys.stderr)
@@ -1111,6 +1320,20 @@ def _compare_snapshot_slots(
         )
     )
 
+    goal_progress: dict[str, Any] | None = None
+    if base_progress and curr_progress:
+        goal_progress = _compare_goal_progress(base_progress, curr_progress)
+    elif not base_progress or not curr_progress:
+        missing = []
+        if not base_progress:
+            missing.append("baseline progress_rollup.json")
+        if not curr_progress:
+            missing.append("current progress_rollup.json")
+        print(
+            f"warning: {school_year} goal progress skipped ({', '.join(missing)} missing)",
+            file=sys.stderr,
+        )
+
     regressions = [row for row in movements if row.get("is_regression")]
     by_type: Counter[str] = Counter(row["movement_type"] for row in movements)
     by_stream: Counter[str] = Counter(row["stream"] for row in movements)
@@ -1131,6 +1354,7 @@ def _compare_snapshot_slots(
         "warnings": warnings,
         "movements": movements,
         "regressions": regressions,
+        "goal_progress": goal_progress,
     }
 
 
@@ -1180,6 +1404,56 @@ def compare_cross_year_snapshots(
     )
 
 
+def _audit_config_from_snapshot_meta(meta: dict[str, Any]) -> audit.AuditConfig:
+    cfg = meta.get("audit_config") or {}
+    excluded = cfg.get("excluded_student_ids")
+    if excluded is not None:
+        excluded = set(excluded)
+    goal_progress_wb = cfg.get("goal_progress_workbook")
+    return audit.AuditConfig(
+        sheet_name=cfg.get("sheet_name", audit.DEFAULT_SHEET),
+        include_ok_rows=bool(cfg.get("include_ok_rows", False)),
+        school_year=meta.get("school_year") or cfg.get("school_year"),
+        goal_progress_workbook=Path(goal_progress_wb) if goal_progress_wb else None,
+        excluded_student_ids=excluded,
+    )
+
+
+def backfill_progress_rollups(
+    snapshots_dir: Path,
+    *,
+    force: bool = False,
+) -> int:
+    manifest = load_manifest(snapshots_dir)
+    updated = 0
+    for entry in manifest.get("snapshots", []):
+        rel = str(entry.get("path", ""))
+        if not rel:
+            continue
+        slot = snapshots_dir / rel
+        progress_path = slot / "metrics" / "progress_rollup.json"
+        if progress_path.is_file() and not force:
+            continue
+        meta_path = slot / "snapshot.json"
+        if not meta_path.is_file():
+            continue
+        meta = _load_json(meta_path)
+        metrics_wb = (meta.get("source_workbooks") or {}).get("metrics")
+        if not metrics_wb or not Path(metrics_wb).is_file():
+            continue
+        audit_cfg = _audit_config_from_snapshot_meta(meta)
+        met_results = audit.evaluate_workbook(Path(metrics_wb), audit_cfg)
+        progress_payload = met_results["progress_rollup"]
+        met_dir = slot / "metrics"
+        met_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(progress_path, progress_payload)
+        meta["content_hashes"] = meta.get("content_hashes") or {}
+        meta["content_hashes"]["metrics/progress_rollup.json"] = _file_hash(progress_path)
+        _write_json(meta_path, meta)
+        updated += 1
+    return updated
+
+
 def run_cross_year_compares(
     school_years: list[str],
     *,
@@ -1187,28 +1461,22 @@ def run_cross_year_compares(
     output_dir: Path,
     regression_threshold: float,
 ) -> int:
-    import config
-
-    ordered = sorted(school_years, key=config._school_year_sort_key)
-    manifest = load_manifest(snapshots_dir)
+    backfilled = backfill_progress_rollups(snapshots_dir)
+    if backfilled:
+        print(f"backfilled progress_rollup.json for {backfilled} snapshot(s)")
+    ordered = discover_eoy_snapshot_years(snapshots_dir)
+    if school_years:
+        allowed = set(school_years)
+        ordered = [school_year for school_year in ordered if school_year in allowed]
     exit_code = 0
     for index in range(1, len(ordered)):
         prior_sy = ordered[index - 1]
         curr_sy = ordered[index]
         prior_slot = snapshot_slot(snapshots_dir, prior_sy, FALLBACK_PERIOD)
-        if not prior_slot.is_dir():
+        curr_slot = snapshot_slot(snapshots_dir, curr_sy, FALLBACK_PERIOD)
+        if not prior_slot.is_dir() or not curr_slot.is_dir():
             continue
-        curr_entries = [
-            entry
-            for entry in manifest.get("snapshots", [])
-            if entry.get("school_year") == curr_sy
-        ]
-        if not curr_entries:
-            continue
-        curr_period = sorted(
-            {str(entry.get("period")) for entry in curr_entries},
-            key=period_sort_key,
-        )[0]
+        curr_period = FALLBACK_PERIOD
         pair_name = f"{prior_sy}_{FALLBACK_PERIOD}_vs_{curr_sy}_{curr_period}"
         pair_dir = output_dir / "cross_year" / pair_name
         try:
@@ -1228,7 +1496,116 @@ def run_cross_year_compares(
         print(f"compare cross-year: {prior_sy}/{FALLBACK_PERIOD} -> {curr_sy}/{curr_period}")
         print(f"  movements: {payload['movement_count']}")
         print(f"  output: {pair_dir}")
+    from visualize import load_cross_year_summaries
+
+    if load_cross_year_summaries(output_dir):
+        report_code = render_cross_year_report(
+            output_dir=output_dir,
+            snapshots_dir=snapshots_dir,
+        )
+        if report_code != 0:
+            return report_code
     return exit_code
+
+
+def run_cross_year_pipeline(
+    *,
+    snapshots_dir: Path | None = None,
+    output_dir: Path | None = None,
+    inputs_dir: Path | None = None,
+    qpr_dir: Path | None = None,
+    goal_achievement_audit_dir: Path | None = None,
+    regression_threshold: float = 0.01,
+    force_fetch: bool = True,
+    force: bool = False,
+    include_accreditation: bool | None = None,
+) -> int:
+    """Pull fresh CISDM exports, refresh EOY snapshots, compare, and render HTML."""
+    snapshots_dir = snapshots_dir or default_snapshots_dir()
+    output_dir = output_dir or default_output_dir()
+    inputs_dir = inputs_dir or default_inputs_dir()
+    qpr_dir = qpr_dir or default_qpr_dir()
+
+    school_years = discover_school_years(
+        qpr_dir=qpr_dir,
+        snapshots_dir=snapshots_dir,
+        inputs_dir=inputs_dir,
+        include_config_years=True,
+    )
+    if not school_years:
+        print("error: no school years found for cross-year trends", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    for school_year in school_years:
+        print(f"=== {school_year} ===", file=sys.stderr)
+        code, status = run_trend_school_year(
+            school_year,
+            snapshots_dir=snapshots_dir,
+            output_dir=output_dir,
+            inputs_dir=inputs_dir,
+            qpr_dir=qpr_dir,
+            force=force or force_fetch,
+            force_fetch=force_fetch,
+            skip_compare=True,
+            skip_empty_periods=True,
+            include_accreditation=include_accreditation,
+        )
+        print(f"status {school_year}: {status}", file=sys.stderr)
+        if code != 0:
+            exit_code = code
+
+    cross_code = run_cross_year_compares(
+        school_years,
+        snapshots_dir=snapshots_dir,
+        output_dir=output_dir,
+        regression_threshold=regression_threshold,
+    )
+    if cross_code != 0:
+        return cross_code
+    if exit_code != 0:
+        return exit_code
+
+    from visualize import load_cross_year_summaries
+
+    if load_cross_year_summaries(output_dir):
+        return 0
+    return render_cross_year_report(
+        output_dir=output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=goal_achievement_audit_dir,
+    )
+
+
+def render_cross_year_report(
+    *,
+    output_dir: Path | None = None,
+    snapshots_dir: Path | None = None,
+    goal_achievement_audit_dir: Path | None = None,
+) -> int:
+    output_dir = output_dir or default_output_dir()
+    snapshots_dir = snapshots_dir or default_snapshots_dir()
+    from visualize import build_cross_year_aggregates, load_cross_year_summaries, render_cross_year_html
+
+    if not load_cross_year_summaries(output_dir):
+        print(
+            "error: no cross-year compare data under "
+            f"{output_dir / 'cross_year'} — run cisiphyus trend --all first",
+            file=sys.stderr,
+        )
+        return 1
+    aggregates = build_cross_year_aggregates(
+        output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=goal_achievement_audit_dir,
+    )
+    report_path = output_dir / "cross_year" / "index.html"
+    render_cross_year_html(aggregates, report_path)
+    print(f"cross-year report: {report_path}")
+    return 0
+
+
+CROSS_YEAR_REPORT_ALIASES = frozenset({"cross-year", "eoy", "cross-year-report"})
 
 
 def _write_movements_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -1247,11 +1624,30 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
         "regression_flags": output_dir / "regression_flags.csv",
         "trend_summary_json": output_dir / "trend_summary.json",
         "trend_summary_md": output_dir / "trend_summary.md",
+        "goal_progress_summary_json": output_dir / "goal_progress_summary.json",
+        "goal_progress_movements": output_dir / "goal_progress_movements.csv",
     }
     _write_movements_csv(paths["trend_movements"], payload.get("movements") or [])
     _write_movements_csv(paths["regression_flags"], payload.get("regressions") or [])
 
-    summary = {k: v for k, v in payload.items() if k not in {"movements", "regressions"}}
+    goal_progress = payload.get("goal_progress")
+    if goal_progress:
+        goal_summary = {k: v for k, v in goal_progress.items() if k not in {"movements", "regressions"}}
+        _write_json(paths["goal_progress_summary_json"], goal_summary)
+        _write_movements_csv(paths["goal_progress_movements"], goal_progress.get("movements") or [])
+    else:
+        paths.pop("goal_progress_summary_json")
+        paths.pop("goal_progress_movements")
+
+    summary = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"movements", "regressions", "goal_progress"}
+    }
+    if goal_progress:
+        summary["goal_progress_summary"] = {
+            k: v for k, v in goal_progress.items() if k not in {"movements", "regressions"}
+        }
     _write_json(paths["trend_summary_json"], summary)
 
     lines = [
@@ -1273,13 +1669,31 @@ def export_trend_results(payload: dict[str, Any], output_dir: Path) -> dict[str,
             f"- **Current:** {payload.get('current_period', '')}",
             f"- **Compared at:** {payload.get('compared_at', '')}",
             "",
-            "## Counts",
+            "## Student Metrics summary totals",
             "",
-            f"- Movements: **{payload.get('movement_count', 0)}**",
-            f"- Regressions: **{payload.get('regression_count', 0)}**",
+            f"- Summary totals changed: **{payload.get('movement_count', 0)}**",
+            f"- Totals that went up: **{payload.get('regression_count', 0)}**",
             "",
         ]
     )
+    if goal_progress:
+        current = goal_progress.get("current") or {}
+        baseline = goal_progress.get("baseline") or {}
+        row_level = goal_progress.get("row_level") or {}
+        lines.extend(
+            [
+                "## Student goal progress",
+                "",
+                f"- Tracked goals (baseline EOY): **{baseline.get('eligible_rows', 0)}**",
+                f"- Tracked goals (current EOY): **{current.get('eligible_rows', 0)}**",
+                f"- On track (baseline EOY): **{baseline.get('on_track_pct', 'n/a')}%**",
+                f"- On track (current EOY): **{current.get('on_track_pct', 'n/a')}%**",
+                f"- Goal progress movements: **{goal_progress.get('movement_count', 0)}**",
+                f"- Goals improved: **{row_level.get('improved', 0)}**",
+                f"- Goals fell behind: **{row_level.get('worsened', 0)}**",
+                "",
+            ]
+        )
     warnings = payload.get("warnings") or []
     if warnings:
         lines.append("## Warnings")
@@ -1349,6 +1763,7 @@ def _cmd_trend(args: argparse.Namespace) -> int:
         return 1
 
     exit_code = 0
+    include_accreditation = _accreditation_cli_flag(args)
     for school_year in unique_years:
         print(f"=== {school_year} ===")
         code, status = run_trend_school_year(
@@ -1362,6 +1777,7 @@ def _cmd_trend(args: argparse.Namespace) -> int:
             skip_compare=args.skip_compare,
             regression_threshold=args.regression_threshold,
             skip_empty_periods=args.all,
+            include_accreditation=include_accreditation,
         )
         print(f"status {school_year}: {status}", file=sys.stderr)
         if code != 0:
@@ -1418,7 +1834,86 @@ def _build_trend_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
         default=0.01,
         help="Minimum pct drop to flag accreditation metric regression (default 0.01).",
     )
+    parser.add_argument(
+        "--accreditation",
+        action="store_true",
+        help="Pull and snapshot accreditation (default: only when ACCREDITATION_FETCH_FROM_CISDM=1).",
+    )
     return parser
+
+
+def _accreditation_cli_flag(args: argparse.Namespace) -> bool | None:
+    return True if args.accreditation else None
+
+
+def _build_cross_year_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Refresh EOY snapshots from CISDM, run cross-year compares, and write the HTML report."
+        ),
+        prog=prog,
+    )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Skip CISDM pull and re-compare; only regenerate HTML from existing artifacts.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-capture snapshots even when period directories already exist.",
+    )
+    parser.add_argument(
+        "--regression-threshold",
+        type=float,
+        default=0.01,
+        help="Minimum pct drop to flag accreditation metric regression (default 0.01).",
+    )
+    parser.add_argument(
+        "--snapshots-dir",
+        type=Path,
+        default=None,
+        help="Snapshot root (default: TREND_SNAPSHOTS_DIR or artifacts/snapshots/).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Trend output root (default: TREND_OUTPUT_DIR or artifacts/trends/).",
+    )
+    parser.add_argument(
+        "--goal-achievement-audit-dir",
+        type=Path,
+        default=None,
+        help="Goal Achievement audit CSV directory (default: GOAL_ACHIEVEMENT_AUDIT_DIR or evaluation path).",
+    )
+    parser.add_argument(
+        "--accreditation",
+        action="store_true",
+        help="Pull and snapshot accreditation (default: only when ACCREDITATION_FETCH_FROM_CISDM=1).",
+    )
+    return parser
+
+
+def main_cross_year(argv: list[str] | None = None) -> int:
+    args = _build_cross_year_parser(prog="cisiphyus trend cross-year").parse_args(argv)
+    if args.no_fetch:
+        return render_cross_year_report(
+            output_dir=args.output_dir,
+            snapshots_dir=args.snapshots_dir,
+            goal_achievement_audit_dir=args.goal_achievement_audit_dir,
+        )
+    return run_cross_year_pipeline(
+        output_dir=args.output_dir,
+        snapshots_dir=args.snapshots_dir,
+        inputs_dir=None,
+        qpr_dir=None,
+        goal_achievement_audit_dir=args.goal_achievement_audit_dir,
+        regression_threshold=args.regression_threshold,
+        force_fetch=True,
+        force=args.force,
+        include_accreditation=_accreditation_cli_flag(args),
+    )
 
 
 def main_trend(argv: list[str] | None = None) -> int:
