@@ -1,0 +1,14 @@
+# WHY: CISEPA enrollment-program IDs are empirical; read each new SY's ID from a fresh
+# ExcelExport URL (@Enrollment_ProgramID) before adding a row. highest SY = default year.
+# @Enrollment_ProgramID and @XSchoolNeedsAssess_X_SchoolYear share this value space.
+school_year_programs:
+  SY17-18: 1323
+  SY18-19: 1324
+  SY19-20: 1325
+  SY20-21: 1326
+  SY21-22: 1327
+  SY22-23: 1328
+  SY23-24: 1329
+  SY24-25: 1330
+  SY25-26: 1331
+  SY26-27: 1332

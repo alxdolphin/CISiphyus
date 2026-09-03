@@ -24,6 +24,7 @@ def find_project_root() -> Path:
 ROOT = find_project_root()
 CONFIG_DIR = ROOT / "config"
 REPORTS_PATH = CONFIG_DIR / "reports.yaml"
+SCHOOL_YEARS_PATH = CONFIG_DIR / "school_years.yaml"
 ENV_PATH = CONFIG_DIR / "export_urls.env"
 ARTIFACTS = ROOT / "artifacts"
 LATEST_DIR = ARTIFACTS / "latest"
@@ -67,13 +68,13 @@ def load_env_file(path: Path) -> None:
 
 def load_reports_config(path: Path) -> dict:
     if not path.exists():
-        raise FileNotFoundError(f"Missing reports.yaml: {path}")
+        raise FileNotFoundError(f"Missing {path.name}: {path}")
 
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
 
     if not isinstance(data, dict):
-        raise ValueError("reports.yaml must be a mapping")
+        raise ValueError(f"{path.name} must be a mapping")
     return data
 
 
@@ -85,7 +86,7 @@ def load_reports(path: Path) -> dict:
     return reports
 
 
-def load_school_year_programs(path: Path) -> dict[str, int]:
+def load_school_year_programs(path: Path = SCHOOL_YEARS_PATH) -> dict[str, int]:
     data = load_reports_config(path)
     raw = data.get("school_year_programs", {})
     if not raw:

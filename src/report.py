@@ -95,6 +95,18 @@ def _resolve_context_url(report_id: str, profile: dict) -> str | None:
     return context_url
 
 
+def _school_year_check(profile: dict, school_year: str | None) -> tuple[str, str] | None:
+    year_scope = profile.get("year_scope")
+    if not isinstance(year_scope, dict) or not school_year:
+        return None
+    column = year_scope.get("verify_column")
+    if column is None:
+        return None
+    if not isinstance(column, str) or not column.strip():
+        raise RuntimeError("year_scope.verify_column must be a non-empty string")
+    return column.strip(), school_year
+
+
 def _resolve_output_paths(
     report_id: str,
     *,
@@ -140,7 +152,7 @@ def run_report(
     try:
         config.load_env_file(config.ENV_PATH)
         reports = config.load_reports(config.REPORTS_PATH)
-        school_year_programs = config.load_school_year_programs(config.REPORTS_PATH)
+        school_year_programs = config.load_school_year_programs()
         default_school_year = config.default_school_year(school_year_programs)
 
         if report_id not in reports:
@@ -185,13 +197,16 @@ def run_report(
         if not raw_path.exists() or raw_path.stat().st_size == 0:
             raise RuntimeError("Download completed but raw.xlsx is missing or empty")
 
-        validation_ok, validation_reason, _metadata = validate.validate_workbook(
+        validation_ok, validation_reason, validation_metadata = validate.validate_workbook(
             raw_path,
             required_columns=required_columns,
             min_size_bytes=min_size_bytes,
+            school_year_check=_school_year_check(profile, resolved_school_year),
         )
         if not validation_ok:
-            raise RuntimeError(f"Validation failed: {validation_reason}")
+            offending = validation_metadata.get("school_year_check", {}).get("offending_values")
+            detail = f" (found {offending})" if offending else ""
+            raise RuntimeError(f"Validation failed: {validation_reason}{detail}")
 
         return artifacts.write_latest_result(
             report_id=report_id,

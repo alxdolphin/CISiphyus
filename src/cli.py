@@ -11,7 +11,7 @@
 #   cisiphyus trend SY25-26
 #   cisiphyus trend cross-year
 #   cisiphyus qpr --grading-period 2.0 ...
-# required: config/reports.yaml, config/export_urls.env
+# required: config/reports.yaml, config/school_years.yaml, config/export_urls.env
 # outputs: artifacts/latest/<report_id>/raw.xlsx
 
 from __future__ import annotations

@@ -153,7 +153,7 @@ def _load_config_programs() -> dict[str, int]:
         sys.path.insert(0, str(src_dir))
     import config
 
-    return config.load_school_year_programs(config.REPORTS_PATH)
+    return config.load_school_year_programs()
 
 
 def current_school_year() -> str | None:
@@ -1460,6 +1460,8 @@ def run_cross_year_compares(
     snapshots_dir: Path,
     output_dir: Path,
     regression_threshold: float,
+    render_html: bool = True,
+    goal_achievement_audit_dir: Path | None = None,
 ) -> int:
     backfilled = backfill_progress_rollups(snapshots_dir)
     if backfilled:
@@ -1498,10 +1500,11 @@ def run_cross_year_compares(
         print(f"  output: {pair_dir}")
     from visualize import load_cross_year_summaries
 
-    if load_cross_year_summaries(output_dir):
+    if render_html and load_cross_year_summaries(output_dir):
         report_code = render_cross_year_report(
             output_dir=output_dir,
             snapshots_dir=snapshots_dir,
+            goal_achievement_audit_dir=goal_achievement_audit_dir,
         )
         if report_code != 0:
             return report_code
@@ -1560,16 +1563,13 @@ def run_cross_year_pipeline(
         snapshots_dir=snapshots_dir,
         output_dir=output_dir,
         regression_threshold=regression_threshold,
+        goal_achievement_audit_dir=goal_achievement_audit_dir,
     )
     if cross_code != 0:
         return cross_code
     if exit_code != 0:
         return exit_code
 
-    from visualize import load_cross_year_summaries
-
-    if load_cross_year_summaries(output_dir):
-        return 0
     return render_cross_year_report(
         output_dir=output_dir,
         snapshots_dir=snapshots_dir,
@@ -1728,9 +1728,74 @@ def resolve_compare_periods(
     return ordered[-2]["period"], ordered[-1]["period"]
 
 
+def _goal_achievement_audit_dir_from_args(args: argparse.Namespace) -> Path | None:
+    return getattr(args, "goal_achievement_audit_dir", None)
+
+
+def _school_years_for_html_report(
+    unique_years: list[str],
+    *,
+    use_all: bool,
+    qpr_dir: Path,
+    snapshots_dir: Path,
+    inputs_dir: Path,
+) -> list[str]:
+    if use_all or len(unique_years) < 2:
+        return discover_school_years(
+            qpr_dir=qpr_dir,
+            snapshots_dir=snapshots_dir,
+            inputs_dir=inputs_dir,
+            include_config_years=True,
+        )
+    return unique_years
+
+
+def finish_trend_html_report(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    snapshots_dir: Path,
+    school_years: list[str],
+    regression_threshold: float,
+    compares_already_ran: bool = False,
+) -> int:
+    audit_dir = _goal_achievement_audit_dir_from_args(args)
+    from visualize import load_cross_year_summaries
+
+    if not compares_already_ran and not load_cross_year_summaries(output_dir):
+        years = _school_years_for_html_report(
+            school_years,
+            use_all=bool(getattr(args, "all", False)),
+            qpr_dir=default_qpr_dir(),
+            snapshots_dir=snapshots_dir,
+            inputs_dir=default_inputs_dir(),
+        )
+        if len(years) < 2:
+            print(
+                "error: --html needs at least two school years with EOY snapshots",
+                file=sys.stderr,
+            )
+            return 1
+        compare_code = run_cross_year_compares(
+            years,
+            snapshots_dir=snapshots_dir,
+            output_dir=output_dir,
+            regression_threshold=regression_threshold,
+            render_html=False,
+            goal_achievement_audit_dir=audit_dir,
+        )
+        if compare_code != 0:
+            return compare_code
+    return render_cross_year_report(
+        output_dir=output_dir,
+        snapshots_dir=snapshots_dir,
+        goal_achievement_audit_dir=audit_dir,
+    )
+
+
 def _cmd_trend(args: argparse.Namespace) -> int:
-    snapshots_dir = default_snapshots_dir()
-    output_dir = default_output_dir()
+    snapshots_dir = args.snapshots_dir or default_snapshots_dir()
+    output_dir = args.output_dir or default_output_dir()
     inputs_dir = default_inputs_dir()
     qpr_dir = default_qpr_dir()
 
@@ -1783,15 +1848,31 @@ def _cmd_trend(args: argparse.Namespace) -> int:
         if code != 0:
             exit_code = code
 
+    compares_ran = False
     if args.all and not args.skip_compare:
         cross_code = run_cross_year_compares(
             unique_years,
             snapshots_dir=snapshots_dir,
             output_dir=output_dir,
             regression_threshold=args.regression_threshold,
+            render_html=bool(args.html),
+            goal_achievement_audit_dir=_goal_achievement_audit_dir_from_args(args),
         )
+        compares_ran = True
         if cross_code != 0:
             exit_code = cross_code
+
+    if args.html:
+        html_code = finish_trend_html_report(
+            args,
+            output_dir=output_dir,
+            snapshots_dir=snapshots_dir,
+            school_years=unique_years,
+            regression_threshold=args.regression_threshold,
+            compares_already_ran=compares_ran,
+        )
+        if html_code != 0:
+            exit_code = html_code
     return exit_code
 
 
@@ -1838,6 +1919,29 @@ def _build_trend_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
         "--accreditation",
         action="store_true",
         help="Pull and snapshot accreditation (default: only when ACCREDITATION_FETCH_FROM_CISDM=1).",
+    )
+    parser.add_argument(
+        "--html",
+        action="store_true",
+        help="Write artifacts/trends/cross_year/index.html from cross-year compare data.",
+    )
+    parser.add_argument(
+        "--goal-achievement-audit-dir",
+        type=Path,
+        default=None,
+        help="Goal Achievement audit directory for final goal achievement charts.",
+    )
+    parser.add_argument(
+        "--snapshots-dir",
+        type=Path,
+        default=None,
+        help="Snapshot root (default: TREND_SNAPSHOTS_DIR or artifacts/snapshots/).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Trend output root (default: TREND_OUTPUT_DIR or artifacts/trends/).",
     )
     return parser
 

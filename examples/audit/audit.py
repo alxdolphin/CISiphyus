@@ -106,7 +106,7 @@ def _load_config_programs() -> dict[str, int]:
         sys.path.insert(0, str(src_dir))
     import config
 
-    return config.load_school_year_programs(config.REPORTS_PATH)
+    return config.load_school_year_programs()
 
 
 def current_school_year() -> str | None:
@@ -430,7 +430,7 @@ def resolve_archived_metrics_workbook(school_year: str) -> Path | None:
             sys.path.insert(0, str(src_dir))
         import config
 
-        programs = config.load_school_year_programs(config.REPORTS_PATH)
+        programs = config.load_school_year_programs()
         if school_year == config.default_school_year(programs):
             latest_raw = config.latest_raw_path(CISIPHYUS_REPORT_ID)
             if latest_raw.is_file():
@@ -578,7 +578,7 @@ def _cisiphyus_raw_path(
             sys.path.insert(0, str(src_dir))
         import config
 
-        programs = config.load_school_year_programs(config.REPORTS_PATH)
+        programs = config.load_school_year_programs()
         default_sy = config.default_school_year(programs)
         if default_sy and school_year != default_sy:
             return config.archives_raw_path(school_year, report_id)
@@ -846,6 +846,12 @@ PRIMARY_GOAL_METRIC_BY_DOMAIN: dict[str, str] = {
 }
 
 GOAL_ACHIEVEMENT_EWGSPE = "Exited Within Same Grading Period Enrolled"
+GAR_OUTCOME_LABELS = (
+    "Goal Met",
+    "Goal Not Met, With Progress",
+    "Goal Not Met, No Progress",
+)
+GAR_GOAL_NOT_MET_LABELS = GAR_OUTCOME_LABELS[1:]
 GOAL_PROGRESS_SHEET = "CIS_StudentProgress_Detail"
 GOAL_PROGRESS_HEADER_ROW = 3
 GOAL_PROGRESS_FILENAME_TEMPLATE = "{school_year}_GoalAchievement.xlsx"
@@ -3567,6 +3573,8 @@ def gar_summarize(
             summary[f"existing::{existing}"] += 1
         if expected:
             summary[f"expected::{expected}"] += 1
+        if reason == "special_status":
+            continue
         if expected and existing and expected == existing:
             summary["matched"] += 1
         elif expected and existing:
@@ -3832,6 +3840,128 @@ def gar_write_markdown_report(payload: dict[str, Any], report_path: Path) -> Non
     report_path.write_text("\n".join(lines) + "\n")
 
 
+def _empty_gar_outcome_counts() -> dict[str, int]:
+    return {label: 0 for label in GAR_OUTCOME_LABELS}
+
+
+def _empty_gar_outcome_bucket() -> dict[str, Any]:
+    return {
+        "recorded": _empty_gar_outcome_counts(),
+        "expected": _empty_gar_outcome_counts(),
+        "matched": 0,
+        "mismatched": 0,
+        "manual_review": 0,
+        "special_status": 0,
+        "total_rows": 0,
+    }
+
+
+def _finalize_gar_outcome_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    classifiable = int(bucket["matched"]) + int(bucket["mismatched"])
+    recorded_total = sum(int(bucket["recorded"][label]) for label in GAR_OUTCOME_LABELS)
+    expected_total = sum(int(bucket["expected"][label]) for label in GAR_OUTCOME_LABELS)
+    mismatch_rate_pct: float | None = None
+    if classifiable:
+        mismatch_rate_pct = round(100 * int(bucket["mismatched"]) / classifiable, 1)
+    recorded_goal_met_pct: float | None = None
+    if recorded_total:
+        recorded_goal_met_pct = round(
+            100 * int(bucket["recorded"]["Goal Met"]) / recorded_total,
+            1,
+        )
+    expected_goal_met_pct: float | None = None
+    if expected_total:
+        expected_goal_met_pct = round(
+            100 * int(bucket["expected"]["Goal Met"]) / expected_total,
+            1,
+        )
+    recorded_not_met = sum(
+        int(bucket["recorded"][label]) for label in GAR_GOAL_NOT_MET_LABELS
+    )
+    expected_not_met = sum(
+        int(bucket["expected"][label]) for label in GAR_GOAL_NOT_MET_LABELS
+    )
+    recorded_goal_not_met_pct: float | None = None
+    if recorded_total:
+        recorded_goal_not_met_pct = round(100 * recorded_not_met / recorded_total, 1)
+    expected_goal_not_met_pct: float | None = None
+    if expected_total:
+        expected_goal_not_met_pct = round(100 * expected_not_met / expected_total, 1)
+    return {
+        **bucket,
+        "classifiable_rows": classifiable,
+        "eligible_rows": classifiable,
+        "mismatch_rate_pct": mismatch_rate_pct,
+        "recorded_goal_met_pct": recorded_goal_met_pct,
+        "expected_goal_met_pct": expected_goal_met_pct,
+        "recorded_goal_not_met_pct": recorded_goal_not_met_pct,
+        "expected_goal_not_met_pct": expected_goal_not_met_pct,
+    }
+
+
+def gar_outcome_rollup(
+    records: list[GarRecord],
+    context: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if context is None:
+        context = {}
+    global_bucket = _empty_gar_outcome_bucket()
+    schools: dict[str, dict[str, Any]] = {}
+
+    def school_bucket(school: str) -> dict[str, Any]:
+        if school not in schools:
+            schools[school] = _empty_gar_outcome_bucket()
+        return schools[school]
+
+    for record in records:
+        school = clean_value(str(record.get("Home School") or "")) or "(unknown)"
+        school_counts = school_bucket(school)
+        for bucket in (global_bucket, school_counts):
+            bucket["total_rows"] += 1
+
+        classification = gar_classify_row(record, context)
+        expected = classification["expected"]
+        existing = clean_value(str(record.get("Goal Achievement") or ""))
+        reason = classification["reason"]
+
+        if reason == "special_status":
+            for bucket in (global_bucket, school_counts):
+                bucket["special_status"] += 1
+            continue
+        if reason in ("manual_review", "baseline_grace_period"):
+            for bucket in (global_bucket, school_counts):
+                bucket["manual_review"] += 1
+            continue
+
+        if existing in GAR_OUTCOME_LABELS:
+            for bucket in (global_bucket, school_counts):
+                bucket["recorded"][existing] += 1
+        if expected in GAR_OUTCOME_LABELS:
+            for bucket in (global_bucket, school_counts):
+                bucket["expected"][expected] += 1
+
+        if expected and existing:
+            if expected == existing:
+                for bucket in (global_bucket, school_counts):
+                    bucket["matched"] += 1
+            else:
+                for bucket in (global_bucket, school_counts):
+                    bucket["mismatched"] += 1
+
+    return {
+        "global": _finalize_gar_outcome_bucket(global_bucket),
+        "schools": {
+            school: _finalize_gar_outcome_bucket(counts)
+            for school, counts in sorted(schools.items())
+        },
+    }
+
+
+def gar_write_outcome_rollup_json(rollup: dict[str, Any], report_path: Path) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(rollup, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def gar_write_csv_report(exception_rows: list[dict[str, Any]], report_path: Path) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -3865,12 +3995,14 @@ def run_gar_audit(
     results = gar_summarize(filtered, context)
     exception_rows = gar_build_exception_rows(filtered, context)
     report_details = gar_build_report_details(filtered, context)
+    outcome_rollup = gar_outcome_rollup(filtered, context)
     return {
         "exception_rows": exception_rows,
         "summary": results["summary"],
         "direction_counts": results["direction_counts"],
         "mismatch_examples": results["mismatch_examples"],
         "report_details": report_details,
+        "outcome_rollup": outcome_rollup,
         "record_count": len(filtered),
         "sheet_name": GOAL_PROGRESS_SHEET,
     }

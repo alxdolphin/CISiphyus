@@ -59,12 +59,20 @@ cisiphyus pull student_metrics_summary
 cisiphyus pull student_metrics_summary --school-year SY24-25
 ```
 
-Year-scoped direct exports (`student_metrics_summary`, `attendance_tracking`,
-`parent_guardian_consent`, `goal_tracking_student_goals`) read `school_year_programs`
-from `config/reports.yaml`. The `url_env` value in `export_urls.env` is a template for
-the current school year; historical years are selected with `--school-year`. Add a new
-row to `school_year_programs` when CISEPA creates the next enrollment program (verify
-the program ID from a fresh CISDM export URL before committing).
+Direct exports with `year_scope` in `config/reports.yaml` read the program ID for a school
+year from `config/school_years.yaml`. The `url_env` value in `export_urls.env` is a template;
+the year param (`@Enrollment_ProgramID` or `@XSchoolNeedsAssess_X_SchoolYear`) is rewritten per pull. The highest
+school year in `school_years.yaml` is the default; `--school-year` selects another and writes
+to `artifacts/archives/<SY>/pulls/<report_id>/`.
+
+**New school year checklist**
+
+1. In CISDM, open any year-scoped export for the new year, copy the ExcelExport URL, and read `@Enrollment_ProgramID`.
+2. Add `SYxx-yy: <id>` to `config/school_years.yaml`. It becomes the default year.
+3. Archive the outgoing year: `cisiphyus pull <report_id> --school-year SYprev` for each year-scoped report you keep.
+4. Re-pull current: `cisiphyus pull student_metrics_summary` and the rest. `result.json` records `school_year` and `enrollment_program_id`; reports with `year_scope.verify_column` fail validation when the workbook's School Year column disagrees.
+5. ReportViewer (`ui_export`) reports pick the year inside the report; refresh the entry URL in `export_urls.env` if it embeds a session.
+6. Optional: paste fresh `CISDM_*_EXPORT_URL` templates (only the program ID differs). Delete `school_year_programs` from a local `reports.yaml` if it is still there.
 
 ## EXAMPLES
 
@@ -118,7 +126,13 @@ cisiphyus trend --all
 
 ## CHANGELOG
 
-8 0.5.0
+* 0.5.1
+  * Track the school-year map in `config/school_years.yaml`; add SY26-27 (program 1332)
+  * Year-scope the five school-level `@XSchoolNeedsAssess_X_SchoolYear` exports
+  * Verify the School Year column on year-scoped pulls (`year_scope.verify_column`)
+  * Derive default workbook names from the current school year in `qpr` and `audit goal-achievement`
+
+* 0.5.0
   * Add `cisiphyus trend` for longitudinal trend tracking
   * Enable URL refresh and URL parameterization to allow for multi-year report extraction (`cisiphyus pull <report_id> --school-year <school-year>`)
   
