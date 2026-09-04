@@ -28,6 +28,13 @@ FIXTURE_TEMPLATE = EXAMPLE_DIR / "fixtures" / "qpr_import_template.xlsx"
 FIXTURE_DEADLINES = EXAMPLE_DIR / "fixtures" / "reporting_deadlines_minimal.xlsx"
 
 
+def test_default_student_metrics_filename_uses_current_school_year() -> None:
+    with patch.object(qpr, "current_school_year", return_value="SY26-27"):
+        assert qpr.default_student_metrics_filename() == "SY26-27_StudentMetricsSummary.xlsx"
+    with patch.object(qpr, "current_school_year", return_value=None):
+        assert qpr.default_student_metrics_filename() == qpr.FALLBACK_STUDENT_METRICS_FILENAME
+
+
 def test_default_cisiphyus_root_is_repo_root() -> None:
     assert _default_cisiphyus_root() == REPO_ROOT
     assert (_default_cisiphyus_root() / "run.py").is_file()
@@ -52,7 +59,7 @@ def test_prefetch_skips_when_fresh(monkeypatch, tmp_path: Path) -> None:
     out_dir = tmp_path / "in"
     out_dir.mkdir(parents=True)
     monkeypatch.setenv("QPR_LOCAL_INPUTS_DIR", str(out_dir))
-    dest = out_dir / qpr.DEFAULT_STUDENT_METRICS_FILENAME
+    dest = out_dir / qpr.default_student_metrics_filename()
     dest.write_bytes(b"fresh")
     calls: list[tuple] = []
 
@@ -73,7 +80,7 @@ def test_prefetch_refreshes_stale_workbook(monkeypatch, tmp_path: Path) -> None:
     out_dir = tmp_path / "in"
     out_dir.mkdir(parents=True)
     monkeypatch.setenv("QPR_LOCAL_INPUTS_DIR", str(out_dir))
-    dest = out_dir / qpr.DEFAULT_STUDENT_METRICS_FILENAME
+    dest = out_dir / qpr.default_student_metrics_filename()
     dest.write_bytes(b"old")
     old = time.time() - (30 * 3600)
     import os

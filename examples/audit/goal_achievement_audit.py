@@ -49,9 +49,9 @@ def preferred_goal_progress_workbook(*, school_year: str | None = None) -> Path:
         resolved = audit.resolve_goal_progress_workbook(school_year)
         if resolved is not None:
             return resolved
-        named = default_local_inputs_dir() / f"{school_year}_GoalProgress.xlsx"
-        return named
-    return default_local_inputs_dir() / "SY25-26_GoalProgress.xlsx"
+        return default_local_inputs_dir() / f"{school_year}_GoalProgress.xlsx"
+    label = audit.current_school_year() or "SY25-26"
+    return default_local_inputs_dir() / f"{label}_GoalProgress.xlsx"
 
 
 def preferred_student_metrics_workbook(*, school_year: str | None = None) -> Path:
@@ -63,7 +63,8 @@ def preferred_student_metrics_workbook(*, school_year: str | None = None) -> Pat
         named = base / f"{school_year}_StudentMetricsSummary.xlsx"
         if named.is_file():
             return named
-    return base / "SY25-26_StudentMetricsSummary.xlsx"
+    label = audit.current_school_year() or "SY25-26"
+    return base / f"{label}_StudentMetricsSummary.xlsx"
 
 
 def preferred_accreditation_workbook() -> Path:
@@ -353,7 +354,6 @@ def resolve_inputs(
     accreditation.fetch_accreditation_workbook(
         destination=accred_path,
         force_fetch=force_fetch,
-        school_year=school_year,
     )
     return AuditInputs(
         goal_progress_workbook=goal_progress_path,
@@ -400,6 +400,7 @@ def run_goal_achievement_audit(
         "summary": gar_results.get("summary") or {},
         "direction_counts": gar_results.get("direction_counts") or {},
         "mismatch_examples": gar_results.get("mismatch_examples") or [],
+        "outcome_rollup": gar_results.get("outcome_rollup") or {},
     }
 
     return {
@@ -431,6 +432,12 @@ def export_goal_achievement_results(payload: dict[str, Any], output_dir: Path) -
 
     audit.gar_write_csv_report(gar_rows, output_dir / "gar_exceptions.csv")
     audit.gar_write_markdown_report(gar_audit, output_dir / "gar_audit_report.md")
+    outcome_rollup = gar_audit.get("outcome_rollup") or {}
+    if outcome_rollup:
+        audit.gar_write_outcome_rollup_json(
+            outcome_rollup,
+            output_dir / "gar_outcome_rollup.json",
+        )
     _write_csv(
         output_dir / "drilldown_exceptions.csv",
         drilldown_rows,
@@ -458,6 +465,11 @@ def export_goal_achievement_results(payload: dict[str, Any], output_dir: Path) -
             gar_rows,
             archive_dir / f"{school_year}_GoalAchievement_AUDIT.csv",
         )
+        if outcome_rollup:
+            audit.gar_write_outcome_rollup_json(
+                outcome_rollup,
+                archive_dir / f"{school_year}_GoalAchievement_ROLLUP.json",
+            )
 
     (output_dir / "goal_achievement_summary.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",

@@ -19,6 +19,7 @@ for path in (EXAMPLE_DIR, AUDIT_DIR):
 
 import audit  # noqa: E402
 import goal_achievement  # noqa: E402
+import goal_achievement_audit  # noqa: E402
 
 _FIXTURE_SPEC = importlib.util.spec_from_file_location(
     "goal_achievement_build_fixture",
@@ -37,6 +38,16 @@ def _fixtures(tmp_path: Path) -> tuple[Path, Path, Path]:
     _build_fixture_module.build_accreditation_fixture(accred)
     _build_fixture_module.build_goal_progress_fixture(goal_progress)
     return metrics, accred, goal_progress
+
+
+def test_goal_achievement_audit_default_names_follow_current_school_year(monkeypatch) -> None:
+    monkeypatch.delenv("GOAL_ACHIEVEMENT_GOAL_PROGRESS_WORKBOOK", raising=False)
+    monkeypatch.delenv("GOAL_ACHIEVEMENT_STUDENT_METRICS_WORKBOOK", raising=False)
+    with patch.object(audit, "current_school_year", return_value="SY26-27"):
+        progress = goal_achievement_audit.preferred_goal_progress_workbook()
+        metrics = goal_achievement_audit.preferred_student_metrics_workbook()
+    assert progress.name == "SY26-27_GoalProgress.xlsx"
+    assert metrics.name == "SY26-27_StudentMetricsSummary.xlsx"
 
 
 def test_cross_audit_flags_count_and_completion_mismatch(tmp_path: Path) -> None:
@@ -145,6 +156,49 @@ def test_cli_resolves_workbooks_via_dual_fetch(tmp_path: Path, monkeypatch) -> N
     assert code == 0
 
 
+def test_gar_outcome_rollup_counts_recorded_and_expected(tmp_path: Path) -> None:
+    _, _, goal_progress = _fixtures(tmp_path)
+    records = audit.load_goal_progress_gar_records(goal_progress)
+    rollup = audit.gar_outcome_rollup(records, {})
+    global_counts = rollup["global"]
+    assert global_counts["total_rows"] == 3
+    assert global_counts["manual_review"] >= 1
+    assert global_counts["matched"] + global_counts["mismatched"] >= 1
+    assert global_counts["recorded"]["Goal Not Met, No Progress"] >= 1
+    assert global_counts["mismatch_rate_pct"] is not None
+    assert global_counts["recorded_goal_not_met_pct"] is not None
+    assert global_counts["expected_goal_not_met_pct"] is not None
+    assert global_counts["recorded_goal_met_pct"] + global_counts["recorded_goal_not_met_pct"] == 100.0
+
+
+def test_gar_outcome_rollup_json_export(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("GOAL_ACHIEVEMENT_OUTPUT_DIR", str(tmp_path))
+    archive_dir = tmp_path / "goal_achievement_audit"
+    metrics, accred, goal_progress = _fixtures(tmp_path)
+    import goal_achievement_audit as ga_audit
+
+    monkeypatch.setattr(ga_audit, "goal_achievement_audit_archive_dir", lambda: archive_dir)
+    code = goal_achievement.main(
+        [
+            "--goal-progress-workbook",
+            str(goal_progress),
+            "--student-metrics-workbook",
+            str(metrics),
+            "--accreditation-workbook",
+            str(accred),
+            "--school-year",
+            "SY25-26",
+        ]
+    )
+    assert code == 0
+    assert (tmp_path / "gar_outcome_rollup.json").is_file()
+    rollup = json.loads((tmp_path / "gar_outcome_rollup.json").read_text(encoding="utf-8"))
+    assert "global" in rollup
+    assert (archive_dir / "SY25-26_GoalAchievement_ROLLUP.json").is_file()
+
+
 def test_gar_constants_in_audit_module() -> None:
     assert audit.GOAL_PROGRESS_SHEET == "CIS_StudentProgress_Detail"
     assert audit.GAR_BASELINE_GRACE_DAYS == 45
+    assert audit.GAR_OUTCOME_LABELS
+    assert "Goal Met" in audit.GAR_OUTCOME_LABELS
