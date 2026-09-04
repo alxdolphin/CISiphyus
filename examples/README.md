@@ -1,7 +1,7 @@
 # downstream applications
 
 Prototypical, fully functional applications that consume CISiphyus exports. Clone this
-repo, bootstrap auth, and run — no private monorepo checkout is required.
+repo, bootstrap auth, and run — no private monorepo checkout is required.n
 
 Each application retrieves its CIS export via cisiphyus when you omit `--workbook` /
 `--metric-workbook` (age-gated refresh when missing or stale). Pass those flags only to

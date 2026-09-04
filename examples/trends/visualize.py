@@ -51,6 +51,25 @@ GOAL_ACHIEVEMENT_EXCEPTION_LABELS: dict[str, str] = {
     "needs_manual_review": "Needs manual review",
 }
 
+GAR_RECORDED_OUTCOME_LABELS: dict[str, str] = {
+    "Goal Met": "Goal Met",
+    "Goal Not Met, With Progress": "With progress",
+    "Goal Not Met, No Progress": "No progress",
+}
+GAR_GOAL_NOT_MET_LABELS = tuple(GAR_RECORDED_OUTCOME_LABELS)[1:]
+
+
+def gar_goal_not_met_pct(outcomes: dict[str, Any] | None) -> float | None:
+    if not outcomes:
+        return None
+    total = sum(
+        int(outcomes.get(label, 0)) for label in GAR_RECORDED_OUTCOME_LABELS
+    )
+    if not total:
+        return None
+    not_met = sum(int(outcomes.get(label, 0)) for label in GAR_GOAL_NOT_MET_LABELS)
+    return round(100 * not_met / total, 1)
+
 # ponytail: fixed set — add colors here if stacked palette grows
 _STACKED_DARK_FILLS = frozenset({"#4c8bf5", "#c678dd", "#56b6c2", "#be5046"})
 _SEGMENT_LABEL_MIN_HEIGHT_PX = 14
@@ -397,12 +416,7 @@ def _cisiphyus_goal_achievement_audit_dir() -> Path:
     return cisiphyus_root / "artifacts" / "goal_achievement_audit"
 
 
-def materialize_goal_achievement_audit_csv(school_year: str) -> Path | None:
-    output_dir = _cisiphyus_goal_achievement_audit_dir()
-    output_path = output_dir / f"{school_year}_GoalAchievement_AUDIT.csv"
-    if output_path.is_file():
-        return output_path
-
+def _load_gar_records_for_school_year(school_year: str) -> list[dict[str, Any]] | None:
     import sys
 
     audit_dir = Path(__file__).resolve().parents[1] / "audit"
@@ -431,11 +445,34 @@ def materialize_goal_achievement_audit_csv(school_year: str) -> Path | None:
             for record in records
             if (audit.clean_value(str(record.get("Student ID") or "")) or "") not in excluded
         ]
+    return records
+
+
+def materialize_goal_achievement_audit_csv(school_year: str) -> Path | None:
+    output_dir = _cisiphyus_goal_achievement_audit_dir()
+    output_path = output_dir / f"{school_year}_GoalAchievement_AUDIT.csv"
+    rollup_path = output_dir / f"{school_year}_GoalAchievement_ROLLUP.json"
+    if output_path.is_file() and rollup_path.is_file():
+        return output_path
+
+    records = _load_gar_records_for_school_year(school_year)
+    if not records:
+        return output_path if output_path.is_file() else None
+
+    import sys
+
+    audit_dir = Path(__file__).resolve().parents[1] / "audit"
+    if str(audit_dir) not in sys.path:
+        sys.path.insert(0, str(audit_dir))
+    import audit  # noqa: WPS433
 
     context: dict[str, str] = {}
-    exception_rows = audit.gar_build_exception_rows(records, context)
+    outcome_rollup = audit.gar_outcome_rollup(records, context)
     output_dir.mkdir(parents=True, exist_ok=True)
-    audit.gar_write_csv_report(exception_rows, output_path)
+    audit.gar_write_outcome_rollup_json(outcome_rollup, rollup_path)
+    if not output_path.is_file():
+        exception_rows = audit.gar_build_exception_rows(records, context)
+        audit.gar_write_csv_report(exception_rows, output_path)
     return output_path
 
 
@@ -453,6 +490,58 @@ def resolve_goal_achievement_audit_csv(
         if path.is_file():
             return path
     return materialize_goal_achievement_audit_csv(school_year)
+
+
+def resolve_goal_achievement_rollup_json(
+    audit_dir: Path | None,
+    school_year: str,
+) -> Path | None:
+    rollup_name = f"{school_year}_GoalAchievement_ROLLUP.json"
+    candidates: list[Path] = []
+    if audit_dir is not None:
+        candidates.append(audit_dir / rollup_name)
+    generated_dir = _cisiphyus_goal_achievement_audit_dir()
+    candidates.append(generated_dir / rollup_name)
+    for path in candidates:
+        if path.is_file():
+            return path
+    materialize_goal_achievement_audit_csv(school_year)
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def load_goal_achievement_rollup(
+    audit_dir: Path | None,
+    school_year: str,
+) -> dict[str, Any] | None:
+    path = resolve_goal_achievement_rollup_json(audit_dir, school_year)
+    if path is None:
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def aggregate_school_goal_achievement_mismatches(
+    rollup: dict[str, Any] | None,
+    *,
+    top_n: int = 10,
+) -> list[dict[str, Any]]:
+    if not rollup:
+        return []
+    rows = [
+        {
+            "school": school,
+            "mismatched": int((counts or {}).get("mismatched", 0)),
+            "mismatch_rate_pct": (counts or {}).get("mismatch_rate_pct"),
+            "recorded_goal_met_pct": (counts or {}).get("recorded_goal_met_pct"),
+            "expected_goal_met_pct": (counts or {}).get("expected_goal_met_pct"),
+        }
+        for school, counts in (rollup.get("schools") or {}).items()
+        if int((counts or {}).get("mismatched", 0)) > 0
+    ]
+    rows.sort(key=lambda row: row["mismatched"], reverse=True)
+    return rows[:top_n]
 
 
 def load_goal_achievement_year(
@@ -571,6 +660,13 @@ def build_cross_year_aggregates(
     goal_on_track_series: list[int | None] = []
     goal_off_track_series: list[int | None] = []
     goal_on_track_pct_series: list[float | None] = []
+    gar_recorded_goal_met_pct_series: list[float | None] = []
+    gar_expected_goal_met_pct_series: list[float | None] = []
+    gar_recorded_goal_not_met_pct_series: list[float | None] = []
+    gar_expected_goal_not_met_pct_series: list[float | None] = []
+    gar_mismatch_rate_series: list[float | None] = []
+    gar_recorded_composition_series: dict[str, list[int]] = {}
+    gar_school_mismatch_leaderboard: list[dict[str, Any]] = []
     goal_progress_transitions: list[dict[str, Any]] = []
     missing_goal_achievement_years: list[str] = []
 
@@ -582,6 +678,7 @@ def build_cross_year_aggregates(
         year_exception_types: list[dict[str, int]] = []
         for school_year in eoy_categories:
             gar = load_goal_achievement_year(goal_achievement_audit_dir, school_year)
+            gar_rollup = load_goal_achievement_rollup(goal_achievement_audit_dir, school_year)
             if gar:
                 exception_count_series.append(int(gar["total"]))
                 schools_with_exceptions_series.append(len(gar.get("school_counts", {})))
@@ -596,6 +693,36 @@ def build_cross_year_aggregates(
                 year_exception_types.append({})
                 if resolve_goal_achievement_audit_csv(goal_achievement_audit_dir, school_year) is None:
                     missing_goal_achievement_years.append(school_year)
+            if gar_rollup:
+                global_rollup = gar_rollup.get("global") or {}
+                gar_recorded_goal_met_pct_series.append(
+                    global_rollup.get("recorded_goal_met_pct")
+                )
+                gar_expected_goal_met_pct_series.append(
+                    global_rollup.get("expected_goal_met_pct")
+                )
+                gar_recorded_goal_not_met_pct_series.append(
+                    global_rollup.get("recorded_goal_not_met_pct")
+                    or gar_goal_not_met_pct(global_rollup.get("recorded"))
+                )
+                gar_expected_goal_not_met_pct_series.append(
+                    global_rollup.get("expected_goal_not_met_pct")
+                    or gar_goal_not_met_pct(global_rollup.get("expected"))
+                )
+                gar_mismatch_rate_series.append(global_rollup.get("mismatch_rate_pct"))
+                for outcome in GAR_RECORDED_OUTCOME_LABELS:
+                    recorded = (global_rollup.get("recorded") or {}).get(outcome, 0)
+                    gar_recorded_composition_series.setdefault(outcome, []).append(
+                        int(recorded)
+                    )
+            else:
+                gar_recorded_goal_met_pct_series.append(None)
+                gar_expected_goal_met_pct_series.append(None)
+                gar_recorded_goal_not_met_pct_series.append(None)
+                gar_expected_goal_not_met_pct_series.append(None)
+                gar_mismatch_rate_series.append(None)
+                for outcome in GAR_RECORDED_OUTCOME_LABELS:
+                    gar_recorded_composition_series.setdefault(outcome, []).append(0)
             issue_counts = load_eoy_global_issue_counts(snapshots_dir, school_year)
             for metric in GLOBAL_METRICS:
                 global_series[metric].append(issue_counts.get(metric))
@@ -637,6 +764,13 @@ def build_cross_year_aggregates(
             school_leaderboard = aggregate_school_goal_achievement_exceptions(
                 goal_achievement_audit_dir,
                 eoy_categories[-1],
+            )
+            gar_latest_rollup = load_goal_achievement_rollup(
+                goal_achievement_audit_dir,
+                eoy_categories[-1],
+            )
+            gar_school_mismatch_leaderboard = aggregate_school_goal_achievement_mismatches(
+                gar_latest_rollup,
             )
     else:
         eoy_categories = list(transition_categories)
@@ -719,6 +853,61 @@ def build_cross_year_aggregates(
             "pair_label": pair_label,
         }
 
+    latest_final_goal_headline: dict[str, Any] | None = None
+    if gar_recorded_goal_met_pct_series and eoy_categories:
+        latest_recorded = next(
+            (
+                value
+                for value in reversed(gar_recorded_goal_met_pct_series)
+                if value is not None
+            ),
+            None,
+        )
+        latest_expected = next(
+            (
+                value
+                for value in reversed(gar_expected_goal_met_pct_series)
+                if value is not None
+            ),
+            None,
+        )
+        latest_mismatch = next(
+            (value for value in reversed(gar_mismatch_rate_series) if value is not None),
+            None,
+        )
+        prior_recorded = next(
+            (
+                value
+                for value in reversed(gar_recorded_goal_met_pct_series[:-1])
+                if value is not None
+            ),
+            None,
+        )
+        yoy_recorded_delta = None
+        if isinstance(latest_recorded, (int, float)) and isinstance(
+            prior_recorded, (int, float)
+        ):
+            yoy_recorded_delta = round(latest_recorded - prior_recorded, 1)
+        gar_global: dict[str, Any] = {}
+        if goal_achievement_audit_dir:
+            latest_rollup = load_goal_achievement_rollup(
+                goal_achievement_audit_dir, eoy_categories[-1]
+            )
+            gar_global = (latest_rollup or {}).get("global") or {}
+        latest_final_goal_headline = {
+            "school_year": eoy_categories[-1],
+            "recorded_goal_met_pct": latest_recorded,
+            "expected_goal_met_pct": latest_expected,
+            "mismatch_rate_pct": latest_mismatch,
+            "yoy_recorded_goal_met_delta_pct": yoy_recorded_delta,
+            "total_rows": gar_global.get("total_rows"),
+            "mismatched": gar_global.get("mismatched"),
+            "manual_review": gar_global.get("manual_review"),
+            "matched": gar_global.get("matched"),
+            "special_status": gar_global.get("special_status"),
+            "classifiable_rows": gar_global.get("classifiable_rows"),
+        }
+
     latest_goal_headline: dict[str, Any] | None = None
     if latest_goal_summary:
         current = latest_goal_summary.get("current") or {}
@@ -767,6 +956,14 @@ def build_cross_year_aggregates(
         "goal_on_track_series": goal_on_track_series,
         "goal_off_track_series": goal_off_track_series,
         "goal_on_track_pct_series": goal_on_track_pct_series,
+        "gar_recorded_goal_met_pct_series": gar_recorded_goal_met_pct_series,
+        "gar_expected_goal_met_pct_series": gar_expected_goal_met_pct_series,
+        "gar_recorded_goal_not_met_pct_series": gar_recorded_goal_not_met_pct_series,
+        "gar_expected_goal_not_met_pct_series": gar_expected_goal_not_met_pct_series,
+        "gar_mismatch_rate_series": gar_mismatch_rate_series,
+        "gar_recorded_composition_series": gar_recorded_composition_series,
+        "gar_school_mismatch_leaderboard": gar_school_mismatch_leaderboard,
+        "latest_final_goal_headline": latest_final_goal_headline,
         "goal_school_leaderboard": goal_school_leaderboard,
         "latest_goal_headline": latest_goal_headline,
         "pair_count": len(transitions),
@@ -840,6 +1037,11 @@ def _on_track_pct_from_rollup(rollup: dict[str, Any] | None) -> float | None:
     if tracked == 0:
         return None
     return round(100 * on_track / tracked, 1)
+
+
+def _line_chart_value_label(value: float) -> int:
+    # WHY: stored rates are rounded to 0.1pp; point labels should round, not truncate
+    return round(value)
 
 
 def _svg_line_chart(
@@ -930,7 +1132,7 @@ def _svg_line_chart(
             if index in labeled_indices:
                 parts.append(
                     f'<text x="{cx:.1f}" y="{cy - value_label_offset:.1f}" '
-                    f'class="data-label" text-anchor="middle">{int(value)}</text>'
+                    f'class="data-label" text-anchor="middle">{_line_chart_value_label(float(value))}</text>'
                 )
         parts.append(
             f'<text x="{width - margin["right"]}" y="{20 + series_index * 14}" '
@@ -1062,10 +1264,14 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     global_series = aggregates.get("global_series") or {}
     school_leaderboard = aggregates.get("school_leaderboard") or []
     eoy_exception_summary = aggregates.get("eoy_exception_summary") or []
-    goal_headline = aggregates.get("latest_goal_headline") or {}
-    goal_school_leaderboard = aggregates.get("goal_school_leaderboard") or []
-    goal_on_track_series = aggregates.get("goal_on_track_series") or []
-    goal_off_track_series = aggregates.get("goal_off_track_series") or []
+    gar_recorded_goal_met_pct_series = aggregates.get("gar_recorded_goal_met_pct_series") or []
+    gar_expected_goal_met_pct_series = aggregates.get("gar_expected_goal_met_pct_series") or []
+    gar_recorded_goal_not_met_pct_series = aggregates.get("gar_recorded_goal_not_met_pct_series") or []
+    gar_expected_goal_not_met_pct_series = aggregates.get("gar_expected_goal_not_met_pct_series") or []
+    gar_mismatch_rate_series = aggregates.get("gar_mismatch_rate_series") or []
+    gar_recorded_composition_series = aggregates.get("gar_recorded_composition_series") or {}
+    gar_school_mismatch_leaderboard = aggregates.get("gar_school_mismatch_leaderboard") or []
+    final_goal_headline = aggregates.get("latest_final_goal_headline") or {}
     transitions = aggregates.get("transitions") or []
     missing_goal_achievement_years = aggregates.get("missing_goal_achievement_years") or []
     goal_achievement_audit_dir = aggregates.get("goal_achievement_audit_dir") or ""
@@ -1092,11 +1298,63 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
         }
         for metric in GLOBAL_METRICS
     ]
-    goal_chart_series = [
-        {"name": "On track", "data": goal_on_track_series},
-        {"name": "Off track", "data": goal_off_track_series},
+    gar_goal_met_series = [
+        {"name": "Recorded Goal Met %", "data": gar_recorded_goal_met_pct_series},
+        {"name": "Expected Goal Met %", "data": gar_expected_goal_met_pct_series},
     ]
-
+    gar_goal_not_met_series = [
+        {"name": "Recorded Goal Not Met %", "data": gar_recorded_goal_not_met_pct_series},
+        {"name": "Expected Goal Not Met %", "data": gar_expected_goal_not_met_pct_series},
+    ]
+    gar_mismatch_series = [
+        {"name": "Mismatch rate %", "data": gar_mismatch_rate_series},
+    ]
+    gar_recorded_composition_chart_series = [
+        {
+            "name": GAR_RECORDED_OUTCOME_LABELS[outcome],
+            "data": gar_recorded_composition_series.get(outcome, []),
+        }
+        for outcome in GAR_RECORDED_OUTCOME_LABELS
+    ]
+    gar_goal_met_svg = _svg_line_chart(
+        width=900,
+        height=320,
+        categories=eoy_categories,
+        series=gar_goal_met_series,
+        y_label="Goal Met % (recorded vs expected) at each EOY",
+        show_value_labels="all",
+    )
+    gar_goal_not_met_svg = _svg_line_chart(
+        width=900,
+        height=320,
+        categories=eoy_categories,
+        series=gar_goal_not_met_series,
+        y_label="Goal Not Met % (recorded vs expected) at each EOY",
+        show_value_labels="all",
+    )
+    gar_recorded_composition_svg = _svg_stacked_bar_chart(
+        width=900,
+        height=340,
+        categories=eoy_categories,
+        series=gar_recorded_composition_chart_series,
+        y_label="Recorded final goal achievement outcomes at each EOY",
+        show_totals=True,
+    )
+    gar_mismatch_svg = _svg_line_chart(
+        width=900,
+        height=320,
+        categories=eoy_categories,
+        series=gar_mismatch_series,
+        y_label="Recorded vs expected mismatch rate at each EOY",
+        show_value_labels="all",
+    )
+    gar_mismatch_school_svg = _svg_horizontal_bar_chart(
+        width=900,
+        height=360,
+        rows=gar_school_mismatch_leaderboard,
+        y_label="Schools with the most recorded vs expected mismatches (latest EOY)",
+        value_key="mismatched",
+    )
     exception_svg = _svg_line_chart(
         width=900,
         height=320,
@@ -1132,31 +1390,19 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
         y_label="Schools with the most exceptions (latest EOY)",
         value_key=school_value_key,
     )
-    goal_svg = _svg_horizontal_bar_chart(
-        width=900,
-        height=360,
-        rows=goal_school_leaderboard,
-        y_label="Largest on-track rate drops by School (latest comparison)",
-        value_key="delta_pct",
-    )
-    goal_timeline_svg = _svg_line_chart(
-        width=900,
-        height=320,
-        categories=eoy_categories,
-        series=goal_chart_series,
-        y_label="Student goal rows on track vs off track at each EOY",
-        show_value_labels="all",
-    )
 
     school_table_rows = "".join(
         f"<tr><td>{row['school']}</td><td>{row.get('exceptions', row.get('regressions', 0))}</td>"
         f"<td><code>{row['top_metric']}</code></td></tr>"
         for row in school_leaderboard
     )
-    goal_school_table_rows = "".join(
-        f"<tr><td>{row['school']}</td><td>{row['delta_pct']}</td>"
-        f"<td>{row.get('baseline_on_track_pct', '')}% → {row.get('current_on_track_pct', '')}%</td></tr>"
-        for row in goal_school_leaderboard
+
+    gar_mismatch_school_table_rows = "".join(
+        f"<tr><td>{row['school']}</td><td>{row['mismatched']}</td>"
+        f"<td>{row.get('recorded_goal_met_pct', 'n/a')}%</td>"
+        f"<td>{row.get('expected_goal_met_pct', 'n/a')}%</td>"
+        f"<td>{row.get('mismatch_rate_pct', 'n/a')}%</td></tr>"
+        for row in gar_school_mismatch_leaderboard
     )
 
     audit_headline_html = ""
@@ -1211,19 +1457,47 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
             audit_headline_html = gar_exception_summary_html
             gar_exception_summary_html = ""
 
-    goal_headline_html = ""
-    if goal_headline:
-        yoy = goal_headline.get("yoy_on_track_delta_pct")
+    final_goal_headline_html = ""
+    if final_goal_headline:
+        yoy = final_goal_headline.get("yoy_recorded_goal_met_delta_pct")
         yoy_text = f"{yoy:+.1f}pp" if isinstance(yoy, (int, float)) else "n/a"
-        goals_tracked = int(goal_headline.get("eligible_rows", 0) or 0)
-        goal_headline_html = f"""
+        recorded = final_goal_headline.get("recorded_goal_met_pct", "n/a")
+        expected = final_goal_headline.get("expected_goal_met_pct", "n/a")
+        mismatch = final_goal_headline.get("mismatch_rate_pct", "n/a")
+        total_rows = final_goal_headline.get("total_rows")
+        mismatched = final_goal_headline.get("mismatched")
+        manual_review = final_goal_headline.get("manual_review")
+        matched = final_goal_headline.get("matched")
+        special_status = final_goal_headline.get("special_status")
+        classifiable_rows = final_goal_headline.get("classifiable_rows")
+        row_counts_caption = ""
+        if isinstance(total_rows, int) and isinstance(mismatched, int) and isinstance(manual_review, int):
+            exceptions = mismatched + manual_review
+            row_counts_caption = (
+                f"{total_rows:,} Goal Progress Detail rows · {mismatched:,} noncompliant · "
+                f"{manual_review:,} review required · {exceptions:,} total exceptions "
+                f"({mismatched:,} + {manual_review:,})"
+            )
+            if isinstance(classifiable_rows, int):
+                row_counts_caption += (
+                    f" · mismatch rate = classifiable rows where recorded ≠ expected ÷ "
+                    f"{classifiable_rows:,} classifiable rows"
+                )
+            if isinstance(matched, int) and isinstance(special_status, int) and special_status:
+                compliant = matched + special_status
+                row_counts_caption += (
+                    f" · {matched:,} matched classifiable rows plus {special_status:,} "
+                    f"Exited Within Same Grading Period Enrolled agreements = "
+                    f"{compliant:,} report-style compliant"
+                )
+        final_goal_headline_html = f"""
         <section class="stats">
-          <div class="stat"><div class="stat-value">{goal_headline.get("on_track_pct", "n/a")}%</div><div class="stat-label">On track (latest EOY)</div></div>
-          <div class="stat"><div class="stat-value">{yoy_text}</div><div class="stat-label">YoY on-track change</div></div>
-          <div class="stat"><div class="stat-value">{goal_headline.get("rows_improved", 0)}</div><div class="stat-label">Goals improved</div></div>
-          <div class="stat"><div class="stat-value danger">{goal_headline.get("rows_worsened", 0)}</div><div class="stat-label">Goals fell behind</div></div>
+          <div class="stat"><div class="stat-value">{recorded}%</div><div class="stat-label">Recorded Goal Met (latest EOY)</div></div>
+          <div class="stat"><div class="stat-value">{expected}%</div><div class="stat-label">Expected Goal Met (latest EOY)</div></div>
+          <div class="stat"><div class="stat-value danger">{mismatch}%</div><div class="stat-label">Mismatch rate</div></div>
+          <div class="stat"><div class="stat-value">{yoy_text}</div><div class="stat-label">YoY recorded Goal Met change</div></div>
         </section>
-        <p class="caption">{goal_headline.get("pair_label", "")} · {goals_tracked:,} student goal rows with baseline and target (audit scope) · on-track % = on track ÷ (on track + off track) · improved/fell behind = same student, school, goal, and metric year over year</p>
+        <p class="caption">{final_goal_headline.get("school_year", "")} · {row_counts_caption or "Goal Progress Detail rows with classifiable recorded and expected outcomes"}</p>
         """
 
     caveats: list[str] = [
@@ -1233,11 +1507,13 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
         "<strong>Audit flag:</strong> a Student Metrics row flagged by "
         "<code>cisiphyus audit metrics</code> (direction mismatch, scale mismatch, "
         "partial goal, etc.).",
+        "<strong>Final goal achievement:</strong> the recorded Goal Achievement label "
+        "on Goal Progress Detail rows (Goal Met, Goal Not Met With Progress, Goal Not Met "
+        "No Progress). Expected outcomes use the same GAR logic as "
+        "<code>cisiphyus audit goal-achievement</code>.",
         "<strong>Goal achievement exception:</strong> a goal progress row where recorded "
         "Goal Achievement does not match what baseline, target, and achieved value imply, "
         "or needs manual review.",
-        "<strong>Goal progress:</strong> the only section that matches the same "
-        "student + school + goal + metric across years (see caveats below).",
     ]
     latest_transition = transitions[-1] if transitions else None
     if (
@@ -1264,30 +1540,39 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
             else ""
         )
         caveats.append(
-            f"<strong>Missing Goal Achievement audit CSV:</strong> {missing_labels} "
-            f"show <code>n/a</code> for exception counts. Add "
-            f"<code>{{school_year}}_GoalAchievement_AUDIT.csv</code>{audit_hint} "
-            f"(from the Student Progress Detail workbook audit) to include them."
+            f"<strong>Missing Goal Achievement audit data:</strong> {missing_labels} "
+            f"show <code>n/a</code> for exception counts. Run "
+            f"<code>cisiphyus audit goal-achievement --school-year &lt;SY&gt;</code>"
+            f"{audit_hint} to generate "
+            f"<code>{{school_year}}_GoalAchievement_AUDIT.csv</code> and "
+            f"<code>{{school_year}}_GoalAchievement_ROLLUP.json</code>."
         )
     caveats.append(
-        "Goal progress does not follow students who changed schools or left the caseload."
+        "Final goal achievement counts use each School Year Goal Progress Detail export; "
+        "they do not follow students who changed schools or left the caseload."
     )
     caveats_html = "".join(f"      <li>{item}</li>\n" for item in caveats)
 
     goal_section_html = ""
-    if goal_headline or any(value is not None for value in goal_on_track_series):
+    if final_goal_headline or any(value is not None for value in gar_recorded_goal_met_pct_series):
         goal_section_html = f"""
-  <h2>Student goal progress</h2>
-  <p class="caption">Matches students who appear in both years with the same school, goal, and metric</p>
-  {goal_headline_html}
-  <h3>On track vs off track over time</h3>
-  <div class="chart">{goal_timeline_svg}</div>
-  <h3>Schools where on-track rate dropped most</h3>
-  <p class="caption">Latest School Year comparison · negative change = fewer goals on track vs prior EOY</p>
-  <div class="chart">{goal_svg}</div>
+  <h2>Final goal achievement</h2>
+  <p class="caption">Recorded Goal Achievement labels on Goal Progress Detail vs GAR-expected outcomes</p>
+  {final_goal_headline_html}
+  <h3>Goal Met % over time</h3>
+  <div class="chart">{gar_goal_met_svg}</div>
+  <h3>Goal Not Met % over time</h3>
+  <div class="chart">{gar_goal_not_met_svg}</div>
+  <h3>Recorded outcomes over time</h3>
+  <div class="chart">{gar_recorded_composition_svg}</div>
+  <h3>Mismatch rate over time</h3>
+  <div class="chart">{gar_mismatch_svg}</div>
+  <h3>Schools with the most mismatches</h3>
+  <p class="caption">Latest School Year EOY · recorded Goal Achievement ≠ expected outcome</p>
+  <div class="chart">{gar_mismatch_school_svg}</div>
   <table>
-    <thead><tr><th>School</th><th>On-track change</th><th>Prior EOY → latest EOY</th></tr></thead>
-    <tbody>{goal_school_table_rows}</tbody>
+    <thead><tr><th>School</th><th>Mismatches</th><th>Recorded Goal Met %</th><th>Expected Goal Met %</th><th>Mismatch rate</th></tr></thead>
+    <tbody>{gar_mismatch_school_table_rows}</tbody>
   </table>
 """
 
@@ -1340,8 +1625,8 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     <ul>
       <li>Each School Year has its <strong>own Student Metrics roster</strong>. Students enter, exit, and change schools — the lists are not the same year to year.</li>
       <li><strong>Audit flag</strong> — a Student Metrics row flagged by <code>cisiphyus audit metrics</code>.</li>
+      <li><strong>Final goal achievement</strong> — recorded Goal Achievement label on Goal Progress Detail (Goal Met, With Progress, No Progress) compared to GAR-expected outcomes from baseline, target, and achieved value.</li>
       <li><strong>Goal achievement exception</strong> — recorded Goal Achievement does not match expected logic from baseline, target, and achieved value, or needs manual review. Source: Goal Achievement audit CSVs.</li>
-      <li><strong>On track</strong> (goal section) — Baseline and Target set; latest Grading Period meets Target (Progress Against Goal).</li>
     </ul>
   </div>
 
@@ -1354,6 +1639,8 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
   <h2>Student metrics audit</h2>
   <p class="caption">Cumulative Student Metrics Summary audit at each School Year EOY — same counts as <code>cisiphyus audit metrics --year all</code></p>
   {audit_headline_html}
+
+{goal_section_html}
 
   <h2>Goal achievement exceptions</h2>
   <p class="caption">Goal progress rows where recorded Goal Achievement does not match expected logic — from Goal Achievement audit exports. Baseline + target % uses goal metrics only (excludes supplemental non-goal rows).</p>
@@ -1379,7 +1666,6 @@ def render_cross_year_html(aggregates: dict[str, Any], path: Path) -> None:
     <tbody>{school_table_rows}</tbody>
   </table>
 
-{goal_section_html}
   <script type="application/json" id="cross-year-data">{payload_json}</script>
 </body>
 </html>

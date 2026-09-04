@@ -21,10 +21,10 @@ Regenerate the cross-year EOY HTML report with `cross-year` (alias: `eoy`).
 
 examples:
   cisiphyus trend SY25-26
-  cisiphyus trend SY25-26 SY24-25
-  cisiphyus trend --all
+  cisiphyus trend SY25-26 SY24-25 --html
+  cisiphyus trend --all --html
   cisiphyus trend cross-year
-  cisiphyus trend eoy
+  cisiphyus trend eoy --no-fetch
 """
 
 

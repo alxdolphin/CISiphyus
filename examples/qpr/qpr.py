@@ -66,7 +66,7 @@ def default_site_staff_list_path() -> Path:
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 STUDENT_METRICS_MAX_AGE_HOURS = 24.0
-DEFAULT_STUDENT_METRICS_FILENAME = "SY25-26_StudentMetricsSummary.xlsx"
+FALLBACK_STUDENT_METRICS_FILENAME = "StudentMetricsSummary.xlsx"
 
 
 @dataclass(frozen=True)
@@ -84,6 +84,25 @@ def _flag_true(raw: str | None) -> bool:
 def _default_cisiphyus_root() -> Path:
     # WHY: prototypical app lives at examples/qpr/ inside the cisiphyus repo
     return Path(__file__).resolve().parents[2]
+
+
+def current_school_year() -> str | None:
+    src_dir = _default_cisiphyus_root() / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    try:
+        import config
+
+        return config.default_school_year(config.load_school_year_programs())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def default_student_metrics_filename() -> str:
+    school_year = current_school_year()
+    if school_year:
+        return f"{school_year}_StudentMetricsSummary.xlsx"
+    return FALLBACK_STUDENT_METRICS_FILENAME
 
 
 def _default_local_inputs_dir() -> Path:
@@ -110,7 +129,7 @@ def preferred_student_metrics_destination(
     ).expanduser().resolve()
     name = (
         os.environ.get("QPR_STUDENT_METRICS_FILENAME", "").strip()
-        or DEFAULT_STUDENT_METRICS_FILENAME
+        or default_student_metrics_filename()
     )
     return (base / name).resolve()
 
