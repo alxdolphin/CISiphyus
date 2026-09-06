@@ -34,6 +34,9 @@ reports:
     display_name: "Accreditation"
     retrieval_strategy: ui_export
     ui_entry_url_env: CISDM_ACCREDITATION_ENTRY_URL
+    # WHY: URLID is year-frozen; verify Report Options instead of rewriting the URL
+    year_scope:
+      verify_report_options: "School Year:"
     expected_extension: ".xlsx"
     min_size_bytes: 1
     required_columns: []

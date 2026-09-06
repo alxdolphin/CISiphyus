@@ -67,6 +67,39 @@ def check_school_year_column(
     return True, "school_year_check_passed", []
 
 
+def check_report_options_school_year(
+    workbook_path: Path,
+    label: str,
+    expected: str,
+    *,
+    sheet_name: str = "Report Options",
+) -> tuple[bool, str, list[str]]:
+    # WHY: ReportViewer embeds School Year as a key/value row, not a data column
+    expected_label = school_year_label(expected) or expected
+    want = normalize_cell(label).rstrip(":").casefold()
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if sheet_name not in workbook.sheetnames:
+            return False, "report_options_sheet_missing", []
+        sheet = workbook[sheet_name]
+        for row in sheet.iter_rows(values_only=True):
+            cells = [normalize_cell(cell) for cell in row]
+            if not cells:
+                continue
+            key = cells[0].rstrip(":").casefold()
+            if key != want:
+                continue
+            raw = next((cell for cell in cells[1:] if cell), "")
+            if not raw:
+                return False, "report_options_school_year_blank", []
+            if school_year_label(raw) != expected_label:
+                return False, "school_year_mismatch", [raw]
+            return True, "school_year_check_passed", []
+    finally:
+        workbook.close()
+    return False, "report_options_school_year_missing", []
+
+
 def find_header_row(
     workbook_path: Path,
     required_columns: list[str],
@@ -114,6 +147,7 @@ def validate_workbook(
     required_columns: list[str],
     min_size_bytes: int,
     school_year_check: tuple[str, str] | None = None,
+    report_options_school_year_check: tuple[str, str] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     metadata: dict[str, Any] = {
         "path": str(workbook_path),
@@ -129,21 +163,38 @@ def validate_workbook(
         header_columns = list(required_columns)
         if school_year_check and school_year_check[0] not in header_columns:
             header_columns.append(school_year_check[0])
-        header_result = find_header_row(workbook_path, header_columns)
-        metadata.update(header_result)
-        if not header_result.get("required_columns_present"):
+        if header_columns:
+            header_result = find_header_row(workbook_path, header_columns)
+            metadata.update(header_result)
+            if not header_result.get("required_columns_present"):
+                return False, "required_columns_missing", metadata
+            if school_year_check:
+                column, expected = school_year_check
+                ok, reason, offending = check_school_year_column(
+                    workbook_path,
+                    header_result["sheet_name"],
+                    header_result["header_row"],
+                    column,
+                    expected,
+                )
+                metadata["school_year_check"] = {
+                    "column": column,
+                    "expected": expected,
+                    "reason": reason,
+                    "offending_values": offending,
+                }
+                if not ok:
+                    return False, reason, metadata
+        elif school_year_check:
             return False, "required_columns_missing", metadata
-        if school_year_check:
-            column, expected = school_year_check
-            ok, reason, offending = check_school_year_column(
-                workbook_path,
-                header_result["sheet_name"],
-                header_result["header_row"],
-                column,
-                expected,
+
+        if report_options_school_year_check:
+            label, expected = report_options_school_year_check
+            ok, reason, offending = check_report_options_school_year(
+                workbook_path, label, expected
             )
-            metadata["school_year_check"] = {
-                "column": column,
+            metadata["report_options_school_year_check"] = {
+                "label": label,
                 "expected": expected,
                 "reason": reason,
                 "offending_values": offending,

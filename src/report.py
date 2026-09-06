@@ -10,6 +10,46 @@ import url_refresh
 import validate
 
 
+def _resolve_year_scope(
+    report_id: str,
+    profile: dict,
+    *,
+    school_year: str | None,
+    school_year_programs: dict[str, int] | None,
+    require_param: bool,
+) -> tuple[str | None, int | None, str | None]:
+    """Return (school_year, program_id, param_or_none)."""
+    year_scope = profile.get("year_scope")
+    if year_scope is None:
+        return None, None, None
+    if not isinstance(year_scope, dict):
+        raise RuntimeError(f"Report {report_id} year_scope must be a mapping")
+
+    param = year_scope.get("param")
+    if param is None:
+        if require_param:
+            raise RuntimeError(f"Report {report_id} year_scope.param must be a non-empty string")
+        param_value = None
+    else:
+        if not isinstance(param, str) or not param.strip():
+            raise RuntimeError(f"Report {report_id} year_scope.param must be a non-empty string")
+        param_value = param.strip()
+
+    programs = school_year_programs or {}
+    if not programs:
+        raise RuntimeError(
+            f"Report {report_id} has year_scope but school_year_programs is empty"
+        )
+    resolved_school_year = school_year or config.default_school_year(programs)
+    if not resolved_school_year:
+        raise RuntimeError(
+            f"Report {report_id} requires a school year; pass --school-year or set "
+            "CISDM_DEFAULT_SCHOOL_YEAR"
+        )
+    enrollment_program_id = config.resolve_program_id(programs, resolved_school_year)
+    return resolved_school_year, enrollment_program_id, param_value
+
+
 def _resolve_report_urls(
     report_id: str,
     profile: dict,
@@ -34,7 +74,21 @@ def _resolve_report_urls(
         entry_url = os.environ.get(entry_key, "")
         if not entry_url:
             raise RuntimeError(f"Missing ReportViewer entry URL env var: {entry_key}")
-        return retrieval_strategy, entry_url, entry_key, None, None
+        # WHY: URLID is year-frozen; year_scope only labels and verifies, never rewrites
+        resolved_school_year, enrollment_program_id, _ = _resolve_year_scope(
+            report_id,
+            profile,
+            school_year=school_year,
+            school_year_programs=school_year_programs,
+            require_param=False,
+        )
+        return (
+            retrieval_strategy,
+            entry_url,
+            entry_key,
+            resolved_school_year,
+            enrollment_program_id,
+        )
 
     url_env = profile.get("url_env")
     if not url_env or not isinstance(url_env, str) or not str(url_env).strip():
@@ -44,30 +98,17 @@ def _resolve_report_urls(
     if not export_url_value:
         raise RuntimeError(f"Missing export URL env var: {url_env}")
 
-    resolved_school_year: str | None = None
-    enrollment_program_id: int | None = None
-    year_scope = profile.get("year_scope")
-    if year_scope is not None:
-        if not isinstance(year_scope, dict):
-            raise RuntimeError(f"Report {report_id} year_scope must be a mapping")
-        param = year_scope.get("param")
-        if not isinstance(param, str) or not param.strip():
-            raise RuntimeError(f"Report {report_id} year_scope.param must be a non-empty string")
-        programs = school_year_programs or {}
-        if not programs:
-            raise RuntimeError(
-                f"Report {report_id} has year_scope but school_year_programs is empty in reports.yaml"
-            )
-        resolved_school_year = school_year or config.default_school_year(programs)
-        if not resolved_school_year:
-            raise RuntimeError(
-                f"Report {report_id} requires a school year; pass --school-year or set "
-                "CISDM_DEFAULT_SCHOOL_YEAR"
-            )
-        enrollment_program_id = config.resolve_program_id(programs, resolved_school_year)
+    resolved_school_year, enrollment_program_id, param = _resolve_year_scope(
+        report_id,
+        profile,
+        school_year=school_year,
+        school_year_programs=school_year_programs,
+        require_param=True,
+    )
+    if param is not None and enrollment_program_id is not None:
         export_url_value = url_refresh.resolve_year_scoped_url(
             export_url_value,
-            param=param.strip(),
+            param=param,
             program_id=enrollment_program_id,
         )
 
@@ -105,6 +146,20 @@ def _school_year_check(profile: dict, school_year: str | None) -> tuple[str, str
     if not isinstance(column, str) or not column.strip():
         raise RuntimeError("year_scope.verify_column must be a non-empty string")
     return column.strip(), school_year
+
+
+def _report_options_school_year_check(
+    profile: dict, school_year: str | None
+) -> tuple[str, str] | None:
+    year_scope = profile.get("year_scope")
+    if not isinstance(year_scope, dict) or not school_year:
+        return None
+    label = year_scope.get("verify_report_options")
+    if label is None:
+        return None
+    if not isinstance(label, str) or not label.strip():
+        raise RuntimeError("year_scope.verify_report_options must be a non-empty string")
+    return label.strip(), school_year
 
 
 def _resolve_output_paths(
@@ -202,9 +257,16 @@ def run_report(
             required_columns=required_columns,
             min_size_bytes=min_size_bytes,
             school_year_check=_school_year_check(profile, resolved_school_year),
+            report_options_school_year_check=_report_options_school_year_check(
+                profile, resolved_school_year
+            ),
         )
         if not validation_ok:
             offending = validation_metadata.get("school_year_check", {}).get("offending_values")
+            if not offending:
+                offending = validation_metadata.get("report_options_school_year_check", {}).get(
+                    "offending_values"
+                )
             detail = f" (found {offending})" if offending else ""
             raise RuntimeError(f"Validation failed: {validation_reason}{detail}")
 

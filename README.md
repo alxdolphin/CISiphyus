@@ -71,7 +71,7 @@ to `artifacts/archives/<SY>/pulls/<report_id>/`.
 2. Add `SYxx-yy: <id>` to `config/school_years.yaml`. It becomes the default year.
 3. Archive the outgoing year: `cisiphyus pull <report_id> --school-year SYprev` for each year-scoped report you keep.
 4. Re-pull current: `cisiphyus pull student_metrics_summary` and the rest. `result.json` records `school_year` and `enrollment_program_id`; reports with `year_scope.verify_column` fail validation when the workbook's School Year column disagrees.
-5. ReportViewer (`ui_export`) reports pick the year inside the report; refresh the entry URL in `export_urls.env` if it embeds a session.
+5. Accreditation (`ui_export`): in CISDM select School Year → View Report → copy the ReportViewer URL into `CISDM_ACCREDITATION_ENTRY_URL`. URLID is year-frozen (not rewritten). Pulls verify Report Options `School Year:` against the default / `--school-year`.
 6. Optional: paste fresh `CISDM_*_EXPORT_URL` templates (only the program ID differs). Delete `school_year_programs` from a local `reports.yaml` if it is still there.
 
 ## EXAMPLES
@@ -125,6 +125,10 @@ cisiphyus trend --all
 ```
 
 ## CHANGELOG
+
+* 0.5.2
+  * Wire accreditation ReportViewer year via URLID refresh plus Report Options School Year verify
+  * ui_export `year_scope` labels/archives without rewriting the URL
 
 * 0.5.1
   * Track the school-year map in `config/school_years.yaml`; add SY26-27 (program 1332)
